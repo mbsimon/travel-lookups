@@ -47,6 +47,10 @@ DEFAULT_RESULTS = 5
 MAX_RESULTS = 12
 
 # Station metadata is static; cache it so repeated sketching costs one call.
+    # Directory name predates the split into travel-lookups and is deliberately
+    # unchanged: renaming it would orphan the warm airport/station caches on both
+    # the Mac and the travel-mcp container's /state volume, and the VPS one is
+    # seeded from the Mac's.
 STATION_CACHE_FILE = Path(
     os.getenv("TRAINS_CACHE_DIR", str(Path.home() / ".cache/flight-research"))
 ) / "stations.json"

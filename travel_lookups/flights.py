@@ -10,9 +10,10 @@ AeroAPI is the default. It costs a fraction of a cent against a monthly credit,
 while SerpApi runs on a 250-search month — so a question about nonstops must
 never spend a SerpApi search.
 
-This module is also the implementation behind the `flights` MCP server on the
-Mac (`~/projects/flight-research`), which imports it rather than keeping its own
-copy. One definition, two front doors.
+This module is also the implementation behind the `travel` MCP server
+(`mbsimon/travel-mcp`, served at travel.michaelbsimon.com/mcp), which imports it
+rather than keeping its own copy. One definition, several front doors — Agency
+HQ's Slack verbs and the itinerary pages come through the same one.
 """
 
 from __future__ import annotations
@@ -66,6 +67,10 @@ STOP_CODES = {"any": 0, "nonstop": 1, "one_stop_max": 2, "two_stops_max": 3}
 
 # Airport metadata is static, so cache it — after the first lookup a route
 # search costs one AeroAPI query instead of three.
+    # Directory name predates the split into travel-lookups and is deliberately
+    # unchanged: renaming it would orphan the warm airport/station caches on both
+    # the Mac and the travel-mcp container's /state volume, and the VPS one is
+    # seeded from the Mac's.
 AIRPORT_CACHE_FILE = Path(
     os.getenv("FLIGHTS_CACHE_DIR", str(Path.home() / ".cache/flight-research"))
 ) / "airports.json"
