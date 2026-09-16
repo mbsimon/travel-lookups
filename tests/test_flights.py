@@ -231,3 +231,50 @@ def test_the_reserve_can_be_spent_deliberately(monkeypatch, tmp_path):
 
     out = flights.itineraries("MAD", "JFK", "2026-09-20", override_budget=True)
     assert out["configured"] is True and "error" not in out
+
+
+def test_us_route_prices_in_dollars(monkeypatch, tmp_path):
+    """A client comparing our fare to what they'd pay themselves shops in
+    dollars when either end touches the US — anything else keeps the
+    EUR/Spain default. Found live: a persisted airport cache from before the
+    `country` field existed silently defeated this and always served EUR."""
+    monkeypatch.setattr(flights, "SERPAPI_LEDGER", tmp_path / "usage.json")
+    monkeypatch.setenv("SERPAPI_KEY", "x")
+    countries = {"MAD": "ES", "JFK": "US", "BCN": "ES", "LHR": "GB"}
+    monkeypatch.setattr(flights, "airport", lambda code: {"country": countries[code.upper()]})
+
+    captured = {}
+
+    class Resp:
+        status_code = 200
+        text = ""
+        @staticmethod
+        def json():
+            return {"best_flights": [], "other_flights": []}
+
+    def fake_get(url, params=None, timeout=None):
+        captured["params"] = params
+        return Resp
+    monkeypatch.setattr(flights.requests, "get", fake_get)
+
+    out = flights.itineraries("MAD", "JFK", "2026-09-20")
+    assert captured["params"]["currency"] == "USD"
+    assert captured["params"]["gl"] == "us"
+    assert out["currency"] == "USD"
+
+    out2 = flights.itineraries("BCN", "LHR", "2026-09-20")
+    assert captured["params"]["currency"] == "EUR"
+    assert captured["params"]["gl"] == "es"
+    assert out2["currency"] == "EUR"
+
+
+def test_airport_cache_without_country_field_is_refreshed(monkeypatch):
+    """A record cached before `country` existed must not be trusted forever —
+    that's exactly how the US-currency check went silently dead live."""
+    monkeypatch.setattr(flights, "_airport_cache", {"JFK": {"iata": "JFK", "city": "New York"}})
+    monkeypatch.setattr(flights, "_save_airport_cache", lambda: None)
+    monkeypatch.setattr(flights, "_aero", lambda path, params=None: {
+        "code_iata": "JFK", "code_icao": "KJFK", "name": "JFK", "city": "New York",
+        "country_code": "US", "timezone": "America/New_York"})
+    record = flights.airport("JFK")
+    assert record["country"] == "US"

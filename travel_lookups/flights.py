@@ -187,12 +187,17 @@ def airport(code: str) -> dict:
     trusted: the caller decides whether to name the place or just the code.
     """
     code = code.strip().upper()
-    if code in _airport_cache:
+    # "country" in the cached record, not just presence, guards against a
+    # persisted cache from before that field existed — a pre-"country" entry
+    # would otherwise serve forever and silently fail the US-currency check
+    # in itineraries() (found live: MAD/JFK were already cached without it).
+    if code in _airport_cache and "country" in _airport_cache[code]:
         return _airport_cache[code]
     data = _aero(f"/airports/{code}")
     verified = not (len(code) == 3 and (data.get("code_iata") or "").upper() != code)
     record = {"iata": data.get("code_iata"), "icao": data.get("code_icao"),
               "name": data.get("name"), "city": data.get("city"),
+              "country": data.get("country_code"),
               "timezone": data.get("timezone"), "latitude": data.get("latitude"),
               "longitude": data.get("longitude"),
               "iata_verified": verified, "requested": code}
@@ -412,13 +417,27 @@ def itineraries(origin: str, destination: str, outbound_date: str,
                 "reason": "SERPAPI_KEY is not set — connecting-itinerary search is "
                           "unavailable. Nonstop lookups still work."}
 
+    # USD/US market whenever either end touches the US — that's the currency
+    # a client comparing our fare to "what I'd pay myself" actually shops in.
+    # Non-US routes keep the EUR/Spain default. Fails soft to the default on
+    # an airport-lookup error; a currency mismatch is a cosmetic problem, not
+    # a reason to drop the whole search.
+    currency, market = DEFAULT_CURRENCY, DEFAULT_MARKET
+    try:
+        touches_us = any(airport(code).get("country") == "US"
+                         for code in (origin, destination))
+        if touches_us:
+            currency, market = "USD", "us"
+    except Exception:
+        pass
+
     params = {"engine": "google_flights", "api_key": key,
               "departure_id": origin.strip().upper(),
               "arrival_id": destination.strip().upper(),
               "outbound_date": outbound_date, "adults": adults,
               "travel_class": CABIN_CODES.get(cabin.lower(), 1),
               "stops": STOP_CODES.get(max_stops.lower(), 0),
-              "currency": DEFAULT_CURRENCY, "hl": DEFAULT_LANGUAGE, "gl": DEFAULT_MARKET}
+              "currency": currency, "hl": DEFAULT_LANGUAGE, "gl": market}
     if return_date:
         params["return_date"] = return_date
     else:
@@ -442,7 +461,7 @@ def itineraries(origin: str, destination: str, outbound_date: str,
     return {"configured": True, "origin": origin.strip().upper(),
             "destination": destination.strip().upper(),
             "outbound_date": outbound_date, "return_date": return_date,
-            "currency": DEFAULT_CURRENCY,
+            "currency": currency,
             "itineraries": [_itinerary(o) for o in options], "count": len(options),
             "price_context": {"lowest": insights.get("lowest_price"),
                               "level": insights.get("price_level"),
