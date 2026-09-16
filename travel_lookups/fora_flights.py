@@ -196,16 +196,34 @@ def _parse_rsc(text: str) -> dict:
     return payload["data"]
 
 
+def _fare0(itinerary: dict) -> dict:
+    return (itinerary.get("itineraryFares") or [{}])[0]
+
+
+def _cabins_per_leg(itinerary: dict) -> list[list[str]]:
+    """`itineraryFares[0].cabinClass` is one entry per PHYSICAL SEGMENT, not
+    per requested leg — a connecting leg (MAD-CMN-JFK) is two segments, so a
+    plain 2-leg round trip with one connection each way carries a 4-entry
+    cabinClass, not 2. Zipping it straight against `legs` misaligns on any
+    itinerary with a stop (found live: an AT MAD-JFK-via-Casablanca result
+    silently reported the wrong cabin on the wrong leg). Split the flat list
+    back into one chunk per requested leg using each leg's own segmentKeys
+    count, which always matches (verified live)."""
+    flat = _fare0(itinerary).get("cabinClass") or []
+    legs = itinerary.get("legs", [])
+    out, i = [], 0
+    for leg in legs:
+        n = max(1, len(leg.get("segmentKeys") or ()))
+        out.append(flat[i:i + n])
+        i += n
+    return out
+
+
 def summarize(itinerary: dict) -> dict:
     """Flatten one itinerary into the fields a human actually wants."""
     legs = itinerary.get("legs", [])
-    # Per-leg cabin lives on the fare, not the leg — `timeline[].cabinCode` is
-    # always "N/A" on every fare seen live; `itineraryFares[0].cabinClass` is
-    # a list, one entry per leg, in leg order (["C", "Y"] = business out,
-    # economy back).
-    fare0 = (itinerary.get("itineraryFares") or [{}])[0]
-    cabins = fare0.get("cabinClass") or []
-    commission = fare0.get("commission") or {}
+    cabins_per_leg = _cabins_per_leg(itinerary)
+    commission = _fare0(itinerary).get("commission") or {}
     return {
         "price_usd": itinerary.get("minFareAmount"),
         # 0 commonly means genuinely non-commissionable (a public/consumer
@@ -223,7 +241,10 @@ def summarize(itinerary: dict) -> dict:
                 "departs_at": leg.get("departsAt"),
                 "arrives_at": leg.get("arrivesAt"),
                 "airline": leg.get("marketingAirline"),
-                "cabin": cabins[i] if i < len(cabins) else None,
+                # A single code normally ("C"); "/".join(...) on the rare
+                # itinerary where a leg's own connection changes cabin
+                # mid-leg, so that's visible rather than silently picking one.
+                "cabin": "/".join(dict.fromkeys(cabins_per_leg[i])) if i < len(cabins_per_leg) and cabins_per_leg[i] else None,
                 "equipment": leg.get("equipmentCodes"),
                 "redeye": leg.get("redeye"),
                 "stops": len(leg.get("stopLocation", [])),
@@ -242,10 +263,23 @@ def search_legs(
     max_responses: int = 200,
     omit_basic_economy: bool = True,
     exclude_airlines: list[str] | None = None,
+    strict_cabin: bool = True,
 ) -> list[dict]:
     """The core call. One-way is a single leg; a round trip is two; a
     multi-city / open-jaw / mixed-cabin trip (e.g. business out, economy
     back) is however many legs you give it, each with its own cabin.
+
+    air1t does NOT strictly filter by the per-leg cabin you ask for — it
+    returns a broad pool across cabins (asking for business out / economy
+    back on MAD-JFK returned 290 itineraries: 123 were business BOTH ways,
+    9 were economy/business, and only 157 actually matched what was asked).
+    Sorting that pool by price alone surfaces the cheapest option
+    REGARDLESS of cabin, which silently answers a different question than
+    the one asked — a real bug found live building this. `strict_cabin`
+    (default True) filters to itineraries whose actual per-leg cabin
+    (via `_cabins_per_leg`) matches the request exactly; pass False to see
+    the full pool, e.g. for "what would it cost to just go all-business
+    instead."
 
     Returns raw itinerary dicts — see `summarize()` to flatten one for
     display. `legs` order is the ORDER FLOWN; there's no reordering here.
@@ -296,7 +330,14 @@ def search_legs(
     resp.raise_for_status()
 
     data = _parse_rsc(resp.text)
-    return data.get("itineraries", [])
+    itineraries = data.get("itineraries", [])
+    if strict_cabin:
+        wanted = [leg.code for leg in legs]
+        itineraries = [
+            it for it in itineraries
+            if [chunk[0] for chunk in _cabins_per_leg(it) if chunk] == wanted
+        ]
+    return itineraries
 
 
 def search(

@@ -91,3 +91,73 @@ def test_summarize_reads_per_leg_cabin_and_commission():
     s = ff.summarize(itinerary)
     assert [leg["cabin"] for leg in s["legs"]] == ["C", "Y"]
     assert s["commission_usd"] == 98.65
+
+
+def test_cabins_per_leg_handles_a_connection():
+    # Real shape seen live: MAD-CMN-JFK outbound (business both segments),
+    # JFK-CMN-MAD return (economy both segments) — a flat 4-entry cabinClass
+    # for a 2-leg trip. Zipping cabinClass straight against legs by index
+    # would put segment 1 (still business) on the return leg.
+    itinerary = {
+        "itineraryFares": [{"cabinClass": ["C", "C", "Y", "Y"]}],
+        "legs": [
+            {"origin": "MAD", "destination": "JFK",
+             "segmentKeys": ["20261021MADCMNAT971", "20261022CMNJFKAT202"]},
+            {"origin": "JFK", "destination": "MAD",
+             "segmentKeys": ["20261202JFKCMNAT201", "20261203CMNMADAT970"]},
+        ],
+    }
+    chunks = ff._cabins_per_leg(itinerary)
+    assert chunks == [["C", "C"], ["Y", "Y"]]
+
+
+def test_summarize_reports_one_cabin_per_leg_through_a_connection():
+    itinerary = {
+        "minFareAmount": 1992.33,
+        "marketingAirlineCodes": ["AT"], "alliance": "oneworld",
+        "totalStops": 2, "elapsedTime": 2155, "key": "k",
+        "itineraryFares": [{"cabinClass": ["C", "C", "Y", "Y"], "commission": {"amount": 75.28}}],
+        "legs": [
+            {"origin": "MAD", "destination": "JFK", "departsAt": "x", "arrivesAt": "y",
+             "marketingAirline": "AT", "equipmentCodes": [], "redeye": True,
+             "stopLocation": ["CMN"], "segmentKeys": ["a", "b"]},
+            {"origin": "JFK", "destination": "MAD", "departsAt": "x", "arrivesAt": "y",
+             "marketingAirline": "AT", "equipmentCodes": [], "redeye": True,
+             "stopLocation": ["CMN"], "segmentKeys": ["c", "d"]},
+        ],
+    }
+    s = ff.summarize(itinerary)
+    assert [leg["cabin"] for leg in s["legs"]] == ["C", "Y"]
+
+
+def test_search_legs_strict_cabin_filters_out_mismatched_fares(monkeypatch):
+    # Requested business out / economy back. Server returns a mixed pool —
+    # a cheaper all-business result and a pricier genuinely-matching one.
+    # strict_cabin=True (the default) must keep only the match.
+    itineraries = [
+        {"minFareAmount": 1992.33, "itineraryFares": [{"cabinClass": ["C", "C"]}],
+         "legs": [{"segmentKeys": ["a"]}, {"segmentKeys": ["b"]}]},
+        {"minFareAmount": 3058.13, "itineraryFares": [{"cabinClass": ["C", "Y"]}],
+         "legs": [{"segmentKeys": ["c"]}, {"segmentKeys": ["d"]}]},
+    ]
+    monkeypatch.setattr(ff, "_load_cookies", lambda: {})
+
+    class Resp:
+        status_code = 200
+        text = '0:{}\n1:' + __import__("json").dumps({"ok": True, "data": {"itineraries": itineraries}})
+
+        @staticmethod
+        def raise_for_status():
+            pass
+
+    monkeypatch.setattr(ff.requests, "post", lambda *a, **k: Resp)
+
+    legs = [ff.Leg("MAD", "JFK", date(2026, 10, 15), "business"),
+            ff.Leg("JFK", "MAD", date(2026, 10, 22), "economy")]
+
+    strict = ff.search_legs(legs)
+    assert len(strict) == 1
+    assert strict[0]["minFareAmount"] == 3058.13
+
+    loose = ff.search_legs(legs, strict_cabin=False)
+    assert len(loose) == 2
