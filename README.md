@@ -3,20 +3,30 @@
 Read-only flight and rail schedule lookups, used for sketching client itineraries.
 
 ```python
-from travel_lookups import flights, trains
+from travel_lookups import flights, trains, fora_flights
 
 flights.nonstop_service("MAD", "JFK", "2026-09-15")   # AeroAPI, codeshares collapsed
 trains.journeys("Madrid Atocha", "Sevilla", "2026-09-15")  # Transitous, free
+fora_flights.search("MAD", "JFK", date(2026, 10, 15), date(2026, 10, 22))  # live Fora fares
 ```
 
 | Module | Source | Cost |
 |---|---|---|
 | `flights` | AeroAPI schedules; SerpApi fares | ~$0.002/query; fares 250/month with a 50 reserve held in code |
 | `trains` | Transitous (open GTFS) | free, no key |
+| `fora_flights` | flights.fora.travel (air1t), Michael's advisor login | free, but a real live GDS/NDC query each call — don't poll |
 
-Nothing here books, holds or reserves. Keys come from the environment
-(`AEROAPI_KEY`, `SERPAPI_KEY`) — none are in this repo, which is why it can be
-public.
+Nothing here books, holds or reserves. Keys/session files come from the
+environment and `~/.config/michaelsimon/` — none are in this repo, which is
+why it can be public.
+
+`fora_flights` rides Michael's personal Fora advisor session (Google SSO,
+captured to a local cookie file — see `scripts/fora_flights_save_session.py`),
+not a plain API key, and supports arbitrary multi-city itineraries with a
+different cabin class per leg (e.g. business outbound, economy return). See
+the module docstring for the full auth chain and response format — it's a
+Next.js Server Action, not a REST endpoint, and its `Next-Action` hash goes
+stale whenever Fora redeploys the tool.
 
 ## Why it exists separately
 

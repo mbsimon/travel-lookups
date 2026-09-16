@@ -1,6 +1,6 @@
 [project]
 name = "travel-lookups"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read-only flight and rail schedule lookups for itinerary work"
 requires-python = ">=3.11"
 dependencies = ["requests>=2.28.0", "python-dotenv>=1.0.0"]
