@@ -7,15 +7,15 @@ SESSION_FILE. The NextAuth session cookie is good for about a month; re-run
 this when fora_flights.SessionExpiredError starts firing.
 
     python3 scripts/fora_flights_save_session.py                  # capture the session cookie
-    python3 scripts/fora_flights_save_session.py --capture-action # also re-learn the Server Action hash
-                                                                    # (run when NextActionStaleError fires —
-                                                                    # it means Fora redeployed flights.fora.travel)
+    python3 scripts/fora_flights_save_session.py --capture-action # diagnostic only, see below
 
---capture-action drives one live search (MAD->JFK, 30 days out) and reads the
-`Next-Action` request header off it, then prints the line to paste into
-fora_flights.NEXT_ACTION (or export as FORA_FLIGHTS_NEXT_ACTION). It does not
-edit anything for you — that constant is small and worth a human glance
-before it changes.
+fora_flights.py now rediscovers the Server Action hash itself (reads it out
+of the page's own JS bundle — see that module's docstring) and retries once
+on a 404, so --capture-action is no longer needed for normal operation.
+Kept as a manual diagnostic: it drives one live search with Playwright and
+prints the `Next-Action` header off the real request, useful for confirming
+by hand that a hash you're staring at in a bug report is actually current,
+or for setting FORA_FLIGHTS_NEXT_ACTION when debugging discovery itself.
 
 Needs `pip install playwright && playwright install chromium` locally — this
 is a one-off Mac-side tool, not a dependency of the fora_flights module
@@ -87,8 +87,9 @@ def main():
             page.goto(f"https://flights.fora.travel/flights/{path}?p=1,0&s=3&r=200&omitbasic=true")
             page.wait_for_timeout(9000)
             if "hash" in captured:
-                print(f"\nNEXT_ACTION = \"{captured['hash']}\"")
-                print("Paste into fora_flights.py's NEXT_ACTION default, or export FORA_FLIGHTS_NEXT_ACTION.")
+                print(f"\nCurrent Server Action hash: {captured['hash']}")
+                print("Diagnostic only — fora_flights.py discovers this itself. "
+                      "export FORA_FLIGHTS_NEXT_ACTION=... only if you need to pin it for debugging.")
             else:
                 print("Didn't see a POST to capture — try again or check the UI still looks the same.",
                       file=sys.stderr)

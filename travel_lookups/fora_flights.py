@@ -37,11 +37,21 @@ an MCP round trip.
    plain round trip is a 2-leg multi-leg query under the hood, which is why
    arbitrary multi-city and per-leg cabin class both just work: `legs` takes
    however many stops you give it, each with its own `cabin`.
-4. `NEXT_ACTION` is tied to the current Vercel deployment (`x-deployment-id`)
-   and WILL go stale whenever Fora redeploys flights.fora.travel — there is
-   no discovery endpoint. `search_legs()` raises `NextActionStaleError` on the
-   resulting 404; re-run
-   `scripts/fora_flights_save_session.py --capture-action` to relearn it.
+4. The Server Action hash is tied to the current Vercel deployment and WILL
+   go stale whenever Fora redeploys flights.fora.travel — there is no
+   documented discovery endpoint, but there doesn't need to be: Next.js embeds
+   the hash in the page's own JS bundle as
+   `createServerReference("<hash>", ..., "searchFlightsAction")`, and the
+   ACTION NAME is a stable, human-chosen string that survives redeploys even
+   though the hash rotates every time. `_discover_next_action()` fetches the
+   page shell, finds the one script tag for the flights page component, greps
+   that bundle for the reference, and caches the result for an hour.
+   `search_legs()` rediscovers and retries ONCE on a 404 before raising
+   `NextActionStaleError` — which after a real rediscovery failure means Fora
+   changed something structural (renamed the action, restructured the page),
+   not just redeployed with the same shape. First found stale live
+   2026-09-18: a routine Fora deploy between one session and the next turned
+   every search into a 404 until this was built.
 
 ## The response isn't quite JSON
 
@@ -59,8 +69,9 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
-from datetime import date as _date
+from datetime import date as _date, timedelta as _timedelta
 from pathlib import Path
 
 import requests
@@ -73,9 +84,12 @@ SESSION_FILE = Path(os.getenv(
 ))
 BASE = "https://flights.fora.travel"
 
-# Captured live 2026-09-16 against deployment dpl_HgFDSmhYykk3167XVBXTbYP1u7Ec.
-# Re-capture with `scripts/fora_flights_save_session.py --capture-action` when stale.
-NEXT_ACTION = os.getenv("FORA_FLIGHTS_NEXT_ACTION", "7f91d1bfff80247533424a95021993396a25c19735")
+# Optional manual pin/override — mainly for tests. Production relies on
+# _discover_next_action() below; leave this unset in normal operation.
+_ENV_NEXT_ACTION = os.getenv("FORA_FLIGHTS_NEXT_ACTION")
+_SEARCH_ACTION_NAME = "searchFlightsAction"
+_ACTION_CACHE_TTL = 3600  # seconds
+_action_cache: dict = {"hash": _ENV_NEXT_ACTION, "fetched_at": 0.0}
 
 # Michael's org-level carrier blacklist (from the session's `organization` object) —
 # used as the default `excludeAirlines` so results match what the UI shows.
@@ -104,8 +118,16 @@ class SessionExpiredError(FlightSearchError):
 
 
 class NextActionStaleError(FlightSearchError):
-    """The hardcoded Server Action hash no longer matches Fora's deployment —
-    re-run scripts/fora_flights_save_session.py --capture-action."""
+    """The Server Action hash is wrong even after rediscovering it — Fora
+    changed something structural (renamed the action, restructured the
+    flights page), not just redeployed with the same shape. A plain
+    redeploy is handled transparently by _get_next_action()'s retry; seeing
+    this error means that retry ALSO failed."""
+
+
+class FlightsUnavailableError(FlightSearchError):
+    """Fora's search page didn't respond as expected and it isn't an auth or
+    action-hash problem — Fora itself is likely down or degraded."""
 
 
 @dataclass
@@ -142,6 +164,85 @@ def _load_cookies() -> dict:
         raise SessionExpiredError("Session file has no NextAuth session cookie — "
                                    "run scripts/fora_flights_save_session.py")
     return cookies
+
+
+_BUNDLE_SRC_RE = re.compile(
+    r'src="(/_next/static/chunks/app/\(private\)/flights/[^"]+page-[^"]+\.js[^"]*)"')
+# Anchored on the hash, not the action name: this minifier wraps the call as
+# `(0,s.createServerReference)("<hash>",...)` — the `)(` between the name and
+# its invocation broke a first version of this regex that assumed a plain
+# `createServerReference("<hash>"` call. Anchoring on the 40-char hex hash
+# itself and only checking that the action name appears somewhere after it
+# (within one statement) survives that kind of minifier-idiom variation.
+_HASH_RE = re.compile(r'"([0-9a-f]{30,64})"')  # seen live at 42 hex chars; a range survives it changing
+
+
+def _discover_next_action(cookies: dict) -> str:
+    """Find the current Server Action hash by reading it out of the flights
+    page's own JS bundle, where Next.js embeds it as
+    `createServerReference("<hash>", ..., "searchFlightsAction")` — see the
+    module docstring for why the action NAME survives redeploys even though
+    the hash doesn't. Two plain GETs, no browser: the page shell (any
+    validly-SHAPED route works — the values don't need to correspond to a
+    real search, only the URL pattern needs to route to the flights page
+    component), then the one script tag matching that component.
+    """
+    dummy_date = (_date.today() + _timedelta(days=30)).isoformat()
+    shell_url = f"{BASE}/flights/MAD-JFK/{dummy_date}+Y"
+    headers = {"user-agent": UA}
+
+    resp = requests.get(shell_url, cookies=cookies, headers=headers, timeout=HTTP_TIMEOUT)
+    if resp.status_code in (401, 403):
+        raise SessionExpiredError(f"HTTP {resp.status_code} fetching the search page — session likely "
+                                   f"expired, run scripts/fora_flights_save_session.py")
+    if resp.status_code >= 500:
+        raise FlightsUnavailableError(f"HTTP {resp.status_code} fetching the search page — Fora itself "
+                                       f"looks to be down or degraded, not an auth or hash problem")
+    resp.raise_for_status()
+
+    m = _BUNDLE_SRC_RE.search(resp.text)
+    if not m:
+        raise NextActionStaleError(
+            "No flights-page script tag in the shell HTML — Fora likely restructured the app "
+            "(not just redeployed the same shape), so pattern-matching the bundle needs a look")
+    bundle_url = BASE + m.group(1)
+
+    bundle_resp = requests.get(bundle_url, cookies=cookies, headers=headers, timeout=HTTP_TIMEOUT)
+    bundle_resp.raise_for_status()
+
+    text = bundle_resp.text
+    name_idx = text.find(f'"{_SEARCH_ACTION_NAME}"')
+    if name_idx == -1:
+        raise NextActionStaleError(
+            f"Found the flights bundle but no {_SEARCH_ACTION_NAME!r} reference in it — Fora likely "
+            f"renamed or restructured the search action itself, needs a fresh look at the bundle")
+
+    # The hash sits earlier in the same statement, e.g.
+    # `(0,s.createServerReference)("<hash>",s.callServer,void 0,...,"searchFlightsAction")` —
+    # take the LAST hash-shaped string before the action name rather than
+    # assuming any particular call-wrapping idiom around createServerReference.
+    preceding = text[max(0, name_idx - 400):name_idx]
+    matches = list(_HASH_RE.finditer(preceding))
+    if not matches:
+        raise NextActionStaleError(
+            f"Found {_SEARCH_ACTION_NAME!r} in the bundle but no hash-shaped string ahead of it — "
+            f"the minifier's call-wrapping idiom around createServerReference changed, needs a fresh look")
+
+    action_hash = matches[-1].group(1)
+    log.info("fora_flights: discovered Next-Action hash %s", action_hash)
+    return action_hash
+
+
+def _get_next_action(cookies: dict, force: bool = False) -> str:
+    """Cached for an hour; `force=True` (used on a 404 retry) always
+    rediscovers regardless of the cache or any FORA_FLIGHTS_NEXT_ACTION pin —
+    a pin that's gone stale must not loop forever."""
+    now = time.monotonic()
+    stale = (now - _action_cache["fetched_at"]) > _ACTION_CACHE_TTL
+    if force or _action_cache["hash"] is None or stale:
+        _action_cache["hash"] = _discover_next_action(cookies)
+        _action_cache["fetched_at"] = now
+    return _action_cache["hash"]
 
 
 _REF_RE = re.compile(r"^\$(\d+):(.*)$")
@@ -255,6 +356,47 @@ def summarize(itinerary: dict) -> dict:
     }
 
 
+def _post_search(url: str, body: str, cookies: dict) -> dict:
+    """POST the Server Action call and return the parsed `{itineraries, ...}`
+    data. Discovers the action hash on first use, and on a 404 — the
+    signature of a rotated hash after a Fora redeploy — rediscovers and
+    retries exactly once before giving up. A caller never sees
+    NextActionStaleError for an ordinary redeploy; only a genuine structural
+    change (the rediscovery itself failing, or the retry ALSO 404ing) raises."""
+    headers = {
+        "accept": "text/x-component",
+        "content-type": "text/plain;charset=UTF-8",
+        "referer": url,
+        "user-agent": UA,
+        # Deliberately no Accept-Encoding override — requests defaults to
+        # gzip/deflate/zstd (no brotli), so Vercel won't send `br` and we
+        # don't need the `brotli` package installed to read the body.
+    }
+
+    for attempt in (1, 2):
+        action_hash = _get_next_action(cookies, force=(attempt == 2))
+        resp = requests.post(url, headers={**headers, "next-action": action_hash},
+                             cookies=cookies, data=body, timeout=HTTP_TIMEOUT)
+        if resp.status_code in (401, 403):
+            raise SessionExpiredError(f"HTTP {resp.status_code} — session likely expired, "
+                                       f"run scripts/fora_flights_save_session.py")
+        if resp.status_code >= 500:
+            raise FlightsUnavailableError(f"HTTP {resp.status_code} — Fora itself looks to be down "
+                                           f"or degraded, not an auth or hash problem")
+        if resp.status_code == 404:
+            if attempt == 1:
+                log.warning("fora_flights: 404 with action hash %s — rediscovering and retrying once",
+                           action_hash)
+                continue
+            raise NextActionStaleError(
+                f"Still HTTP 404 after rediscovering the action hash (now {action_hash}) — Fora "
+                f"changed something structural, not just redeployed the same shape")
+        resp.raise_for_status()
+        return _parse_rsc(resp.text)
+
+    raise AssertionError("unreachable")  # the loop always returns or raises
+
+
 def search_legs(
     legs: list[Leg],
     adults: int = 1,
@@ -310,26 +452,7 @@ def search_legs(
     ])
 
     cookies = _load_cookies()
-    headers = {
-        "next-action": NEXT_ACTION,
-        "accept": "text/x-component",
-        "content-type": "text/plain;charset=UTF-8",
-        "referer": url,
-        "user-agent": UA,
-        # Deliberately no Accept-Encoding override — requests defaults to
-        # gzip/deflate/zstd (no brotli), so Vercel won't send `br` and we
-        # don't need the `brotli` package installed to read the body.
-    }
-
-    resp = requests.post(url, headers=headers, cookies=cookies, data=body, timeout=HTTP_TIMEOUT)
-    if resp.status_code in (401, 403):
-        raise SessionExpiredError(f"HTTP {resp.status_code} — session likely expired, "
-                                   f"run scripts/fora_flights_save_session.py")
-    if resp.status_code == 404:
-        raise NextActionStaleError("HTTP 404 on the Server Action call — Next-Action hash is probably stale")
-    resp.raise_for_status()
-
-    data = _parse_rsc(resp.text)
+    data = _post_search(url, body, cookies)
     itineraries = data.get("itineraries", [])
     if strict_cabin:
         wanted = [leg.code for leg in legs]
@@ -358,9 +481,30 @@ def search(
     return search_legs(legs, **kwargs)
 
 
+def health_check() -> dict:
+    """Exercise the whole chain — session, action discovery, and a real live
+    search — so a broken deploy fails loudly here instead of mid a client
+    search. Deliberately a real one-way query (nothing about this module is
+    metered), not a mocked ping: the failure modes worth catching (expired
+    session, rotated-and-undiscoverable action hash, Fora itself down) only
+    show up under a real request. Not wired into travel-mcp's routine
+    `/health` — that fires every 60s and shouldn't hit Fora's live search on
+    that cadence. Run by hand or from a deploy-time smoke step instead."""
+    dep = _date.today() + _timedelta(days=30)
+    try:
+        results = search_legs([Leg("MAD", "JFK", dep, "economy")], max_responses=10)
+    except FlightSearchError as exc:
+        return {"ok": False, "error_type": type(exc).__name__, "error": str(exc)}
+    return {"ok": True, "itineraries_found": len(results)}
+
+
 if __name__ == "__main__":
     import sys
     from datetime import timedelta
+
+    if "--health" in sys.argv:
+        print(health_check())
+        sys.exit(0)
 
     dep = _date.today() + timedelta(days=30)
     ret = dep + timedelta(days=7)

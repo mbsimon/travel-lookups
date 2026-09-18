@@ -25,8 +25,10 @@ captured to a local cookie file — see `scripts/fora_flights_save_session.py`),
 not a plain API key, and supports arbitrary multi-city itineraries with a
 different cabin class per leg (e.g. business outbound, economy return). See
 the module docstring for the full auth chain and response format — it's a
-Next.js Server Action, not a REST endpoint, and its `Next-Action` hash goes
-stale whenever Fora redeploys the tool.
+Next.js Server Action, not a REST endpoint. The action's hash rotates on
+every Fora frontend deploy; the module rediscovers it itself (reads it out
+of the page's own JS bundle) and retries once on a 404, so an ordinary Fora
+deploy is invisible to callers — no manual re-capture step needed anymore.
 
 ## Why it exists separately
 
