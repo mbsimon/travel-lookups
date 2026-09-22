@@ -30,6 +30,13 @@ every Fora frontend deploy; the module rediscovers it itself (reads it out
 of the page's own JS bundle) and retries once on a 404, so an ordinary Fora
 deploy is invisible to callers — no manual re-capture step needed anymore.
 
+**Basic economy is excluded by default.** Standing rule: never quote it
+unless specifically asked. Enforced both at the request (`omitBasicEconomy`)
+and again client-side (`baggage == 0` on the fare), since the upstream flag
+isn't trusted alone. Every result also carries `basic_economy`,
+`checked_bags` and `fare_brands` so the fare class is visible, not just
+filtered — pass `omit_basic_economy=False` to see it when asked for.
+
 ## Why it exists separately
 
 It was implemented twice — once in agency-hq for the Slack verbs and MCP tools,

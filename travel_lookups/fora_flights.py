@@ -14,6 +14,17 @@ One definition, several front doors: the `travel` MCP server
 itinerary pages can import this module directly for the same result without
 an MCP round trip.
 
+**Basic economy is excluded by default, everywhere.** Michael's standing
+rule: never quote it unless specifically asked. `search_legs()`'s
+`omit_basic_economy=True` default both asks air1t to exclude it AND
+verifies client-side (`_is_basic_economy`, mainly `baggage == 0` on the
+fare) in case the upstream flag ever misses one — this is a third-party API
+with no contract, so the "never" isn't trusted to a single upstream switch.
+Every surfaced itinerary also carries `basic_economy`, `checked_bags` and
+`fare_brands` (the airline's own name — MAIN CABIN, LITE, OPTIMA, DELTA
+MAIN BASIC, ...) via `summarize()`, so the caller can SEE the fare class
+rather than just trust it was filtered.
+
 ## Auth chain, captured live 2026-09-16
 
 1. Google SSO sets a NextAuth session cookie (`__Secure-authjs.session-token`)
@@ -301,6 +312,28 @@ def _fare0(itinerary: dict) -> dict:
     return (itinerary.get("itineraryFares") or [{}])[0]
 
 
+# Airlines file basic economy under their own brand name (Air Europa "LITE",
+# Air France/KLM "LIGHT", Delta "DELTA MAIN BASIC") — no single string is
+# universal. `baggage == 0` is: every basic-economy-branded fare seen live
+# across AF/KL/DL/UX carried it, every MAIN CABIN/STANDARD/FLEX/OPTIMA/
+# COMFORT-branded fare carried `baggage: 1`. Falls back to a brand-name
+# substring match only when `baggage` itself is missing — a false negative
+# here means a basic economy fare gets quoted as if it weren't, which is
+# the one failure mode worth over-guarding against.
+_BASIC_ECONOMY_BRAND_MARKERS = ("BASIC", "LITE", "LIGHT")
+
+
+def _is_basic_economy(fare: dict) -> bool:
+    baggage = fare.get("baggage")
+    if baggage is not None:
+        return baggage == 0
+    return any(
+        marker in (b.get("brandName") or "").upper()
+        for b in (fare.get("branding") or [])
+        for marker in _BASIC_ECONOMY_BRAND_MARKERS
+    )
+
+
 def _cabins_per_leg(itinerary: dict) -> list[list[str]]:
     """`itineraryFares[0].cabinClass` is one entry per PHYSICAL SEGMENT, not
     per requested leg — a connecting leg (MAD-CMN-JFK) is two segments, so a
@@ -324,13 +357,31 @@ def summarize(itinerary: dict) -> dict:
     """Flatten one itinerary into the fields a human actually wants."""
     legs = itinerary.get("legs", [])
     cabins_per_leg = _cabins_per_leg(itinerary)
-    commission = _fare0(itinerary).get("commission") or {}
+    fare0 = _fare0(itinerary)
+    commission = fare0.get("commission") or {}
+    # branding[] is per PHYSICAL SEGMENT like cabinClass, EXCEPT it sometimes
+    # collapses consecutive segments that share a brand into fewer entries —
+    # seen live: a 2-segment leg reported as ONE branding entry when both
+    # segments were the same brand, vs. cabinClass, which never collapses.
+    # That makes branding unsafe to zip against legs the way cabin is, so
+    # this surfaces the distinct brand names present without claiming which
+    # leg each belongs to — still enough to answer "is any part of this
+    # basic economy" and "what's it actually called".
+    fare_brands = list(dict.fromkeys(
+        b.get("brandName") for b in (fare0.get("branding") or []) if b.get("brandName")))
     return {
         "price_usd": itinerary.get("minFareAmount"),
         # 0 commonly means genuinely non-commissionable (a public/consumer
         # fare), not missing data — NDC/contract fares carry a real number
         # (seen live: AZ/AT via sourcePcc F6V0, contractQualifier TMC26/AT2026).
         "commission_usd": commission.get("amount"),
+        # Checked-bag count and the airline's own fare-brand name (MAIN
+        # CABIN, LITE, OPTIMA, ...) — surfaced explicitly, not just filtered,
+        # per Michael: he needs to SEE the fare class, not just trust it was
+        # excluded. basic_economy is the one to gate any quote on.
+        "basic_economy": _is_basic_economy(fare0),
+        "checked_bags": fare0.get("baggage"),
+        "fare_brands": fare_brands,
         "airlines": itinerary.get("marketingAirlineCodes", itinerary.get("airlineCodes")),
         "alliance": itinerary.get("alliance"),
         "stops": itinerary.get("totalStops"),
@@ -423,8 +474,19 @@ def search_legs(
     the full pool, e.g. for "what would it cost to just go all-business
     instead."
 
+    `omit_basic_economy` (default True): Michael's standing rule is he NEVER
+    wants basic economy quoted unless he specifically asked for it. Fora's
+    own `omitBasicEconomy` request flag does the real filtering (verified
+    live: 0 of 76 basic-economy fares survived it on a route/date where they
+    were definitely on sale) but this is a third-party API with no contract,
+    so that's not trusted alone — every returned itinerary is also checked
+    client-side (`_is_basic_economy`, mainly `baggage == 0`) and dropped if
+    it slipped through anyway. Pass False only when Michael has actually
+    asked to see basic economy.
+
     Returns raw itinerary dicts — see `summarize()` to flatten one for
-    display. `legs` order is the ORDER FLOWN; there's no reordering here.
+    display (`basic_economy`, `checked_bags`, `fare_brands`). `legs` order
+    is the ORDER FLOWN; there's no reordering here.
     """
     if not legs:
         raise FlightSearchError("search_legs() needs at least one leg")
@@ -460,6 +522,8 @@ def search_legs(
             it for it in itineraries
             if [chunk[0] for chunk in _cabins_per_leg(it) if chunk] == wanted
         ]
+    if omit_basic_economy:
+        itineraries = [it for it in itineraries if not _is_basic_economy(_fare0(it))]
     return itineraries
 
 

@@ -141,6 +141,7 @@ def test_search_legs_strict_cabin_filters_out_mismatched_fares(monkeypatch):
          "legs": [{"segmentKeys": ["c"]}, {"segmentKeys": ["d"]}]},
     ]
     monkeypatch.setattr(ff, "_load_cookies", lambda: {})
+    monkeypatch.setattr(ff, "_get_next_action", lambda cookies, force=False: "h")  # no network
 
     class Resp:
         status_code = 200
@@ -314,3 +315,73 @@ def test_get_next_action_caches_until_forced(monkeypatch):
 
     ff._get_next_action({}, force=True)  # force always rediscovers
     assert len(calls) == 2
+
+
+def test_is_basic_economy_reads_baggage_count():
+    assert ff._is_basic_economy({"baggage": 0}) is True
+    assert ff._is_basic_economy({"baggage": 1}) is False
+    assert ff._is_basic_economy({"baggage": 2}) is False
+
+
+def test_is_basic_economy_falls_back_to_brand_name_when_baggage_missing():
+    # Real brand names seen live: Air Europa "LITE", Air France/KLM "LIGHT",
+    # Delta "DELTA MAIN BASIC" — all basic economy, no shared literal string,
+    # but a missing baggage count must not silently read as "not basic".
+    assert ff._is_basic_economy({"branding": [{"brandName": "LITE"}]}) is True
+    assert ff._is_basic_economy({"branding": [{"brandName": "DELTA MAIN BASIC"}]}) is True
+    assert ff._is_basic_economy({"branding": [{"brandName": "MAIN CABIN"}]}) is False
+    assert ff._is_basic_economy({}) is False
+
+
+def test_summarize_surfaces_basic_economy_fields():
+    itinerary = {
+        "minFareAmount": 577.53, "marketingAirlineCodes": ["UX"], "alliance": None,
+        "totalStops": 0, "elapsedTime": 500, "key": "k",
+        "itineraryFares": [{
+            "cabinClass": ["Y", "Y"], "baggage": 0, "commission": {"amount": 0},
+            "branding": [{"brandName": "LITE"}, {"brandName": "LITE"}],
+        }],
+        "legs": [
+            {"origin": "MAD", "destination": "JFK", "departsAt": "x", "arrivesAt": "y",
+             "marketingAirline": "UX", "equipmentCodes": [], "redeye": False, "stopLocation": []},
+            {"origin": "JFK", "destination": "MAD", "departsAt": "x", "arrivesAt": "y",
+             "marketingAirline": "UX", "equipmentCodes": [], "redeye": True, "stopLocation": []},
+        ],
+    }
+    s = ff.summarize(itinerary)
+    assert s["basic_economy"] is True
+    assert s["checked_bags"] == 0
+    assert s["fare_brands"] == ["LITE"]
+
+
+def _fake_search_response(itineraries):
+    body = '0:{}\n1:' + __import__("json").dumps({"ok": True, "data": {"itineraries": itineraries}})
+
+    class Resp:
+        status_code = 200
+        text = body
+
+        @staticmethod
+        def raise_for_status():
+            pass
+    return Resp
+
+
+def test_search_legs_excludes_basic_economy_by_default(monkeypatch):
+    itineraries = [
+        {"minFareAmount": 500, "itineraryFares": [{"cabinClass": ["Y"], "baggage": 0}],
+         "legs": [{"segmentKeys": ["a"]}]},
+        {"minFareAmount": 600, "itineraryFares": [{"cabinClass": ["Y"], "baggage": 1}],
+         "legs": [{"segmentKeys": ["b"]}]},
+    ]
+    monkeypatch.setattr(ff, "_load_cookies", lambda: {})
+    monkeypatch.setattr(ff, "_get_next_action", lambda cookies, force=False: "h")
+    monkeypatch.setattr(ff.requests, "post", lambda *a, **k: _fake_search_response(itineraries))
+
+    default_results = ff.search_legs([ff.Leg("MAD", "JFK", date(2026, 10, 15), "economy")], strict_cabin=False)
+    assert len(default_results) == 1
+    assert default_results[0]["minFareAmount"] == 600
+
+    allowed_results = ff.search_legs([ff.Leg("MAD", "JFK", date(2026, 10, 15), "economy")],
+                                     strict_cabin=False, omit_basic_economy=False)
+    assert len(allowed_results) == 2
