@@ -52,6 +52,7 @@ PENALTY_EARLY = 1.0
 LATE_ARRIVAL_FROM, LATE_ARRIVAL_UNTIL = 21, 5
 PENALTY_LATE = 2.0
 OVERNIGHT_LAYOVER_MIN = 240
+BY_ROUTING_MAX = 15
 
 # Exclusions an agent can lift, and how.
 LIFT = {
@@ -447,7 +448,7 @@ def build(itineraries: list[dict], o: Options) -> dict:
                                           "fare_brands": f["brands"], "status": status(r)}
 
     by_routing = defaultdict(lambda: {"routings": 0, "cheapest_per_person_usd": None,
-                                      "fastest": None})
+                                      "fastest": None, "_best": None})
     for r in ok:
         carrier = r["legs"][0]["airline"] or "?"
         via = " / ".join(",".join(l["airport"] for l in lg["layovers"]) or "nonstop"
@@ -459,9 +460,13 @@ def build(itineraries: list[dict], o: Options) -> dict:
             b["cheapest_per_person_usd"] = p
         if b["fastest"] is None or r["elapsed"] < b["_e"]:
             b["fastest"], b["_e"] = _mins(r["elapsed"]), r["elapsed"]
-    by_routing_out = sorted(({"routing": k, **{x: y for x, y in v.items() if x != "_e"}}
-                             for k, v in by_routing.items()),
-                            key=lambda d: d["cheapest_per_person_usd"])
+        if b["_best"] is None or key(r) < b["_best"]:
+            b["_best"] = key(r)
+    # The best of each routing first, capped: a round trip produced 48 lines,
+    # which is a list to wade through, not a map.
+    by_routing_out = [{"routing": k, **{x: y for x, y in v.items() if not x.startswith("_")}}
+                      for k, v in sorted(by_routing.items(), key=lambda kv: kv[1]["_best"])
+                      ][:BY_ROUTING_MAX]
 
     out = {
         "shortlist": [{"rank": i + 1, **_row(r, o)} for i, r in enumerate(shortlist)],

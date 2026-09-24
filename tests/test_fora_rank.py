@@ -160,3 +160,9 @@ def test_an_airport_change_is_never_offered_unless_asked():
         assert "/" not in a["connections"], a
     allowed = _build(flights=flights, allow_airport_change=True)
     assert allowed["shortlist"]
+
+
+def test_by_routing_is_capped_and_best_first():
+    out = _build()
+    assert 0 < len(out["by_routing"]) <= fr.BY_ROUTING_MAX
+    assert out["by_routing"][0]["routing"].startswith("DL via ATL")
