@@ -90,7 +90,7 @@ def test_summarize_reads_per_leg_cabin_and_commission():
     }
     s = ff.summarize(itinerary)
     assert [leg["cabin"] for leg in s["legs"]] == ["C", "Y"]
-    assert s["commission_usd"] == 98.65
+    assert s["commission_per_ticket_usd"] == 98.65
 
 
 def test_cabins_per_leg_handles_a_connection():
@@ -385,3 +385,18 @@ def test_search_legs_excludes_basic_economy_by_default(monkeypatch):
     allowed_results = ff.search_legs([ff.Leg("MAD", "JFK", date(2026, 10, 15), "economy")],
                                      strict_cabin=False, omit_basic_economy=False)
     assert len(allowed_results) == 2
+
+
+def test_price_is_labeled_per_person_and_total():
+    """minFareAmount is per person. Read as a 2-adult total it halved a
+    business quote (BNA-NAP-BCN/MAD-BNA: $7,306.63 per person, not per party).
+    Shape and figures from a live JFK-LHR business search at 2 adults."""
+    it = {"minFareAmount": 2954.33, "legs": [], "key": "k",
+          "itineraryFares": [{"rawFare": 2954.33, "commission": {"amount": 154},
+                              "totalFare": {"totalPrice": 5908.66,
+                                            "totalTaxAmount": 1508.66}}]}
+    s = ff.summarize(it)
+    assert s["price_per_person_usd"] == 2954.33
+    assert s["price_total_usd"] == 5908.66
+    assert s["commission_per_ticket_usd"] == 154
+    assert "price_usd" not in s and "commission_usd" not in s

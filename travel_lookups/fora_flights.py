@@ -369,12 +369,22 @@ def summarize(itinerary: dict) -> dict:
     # basic economy" and "what's it actually called".
     fare_brands = list(dict.fromkeys(
         b.get("brandName") for b in (fare0.get("branding") or []) if b.get("brandName")))
+    # Both prices are named for what they are. This field used to be
+    # `price_usd`, carrying minFareAmount, which is PER PERSON (the same
+    # JFK-LHR fare read $2,954.33 at 1 adult and at 2). A 2-adult search read
+    # as a party total came out at half the real cost, and a business quote
+    # was nearly sent at half price. The party total is Fora's own
+    # totalFare.totalPrice on the same fare (checked live: exactly N x the
+    # per-person fare on every one of 375 itineraries).
+    total = (fare0.get("totalFare") or {}).get("totalPrice")
     return {
-        "price_usd": itinerary.get("minFareAmount"),
-        # 0 commonly means genuinely non-commissionable (a public/consumer
-        # fare), not missing data — NDC/contract fares carry a real number
-        # (seen live: AZ/AT via sourcePcc F6V0, contractQualifier TMC26/AT2026).
-        "commission_usd": commission.get("amount"),
+        "price_per_person_usd": fare0.get("rawFare", itinerary.get("minFareAmount")),
+        "price_total_usd": total,
+        # Per ticket, like the price: $154 at 1 adult and at 2. 0 commonly
+        # means genuinely non-commissionable (a public/consumer fare), not
+        # missing data — NDC/contract fares carry a real number (seen live:
+        # AZ/AT via sourcePcc F6V0, contractQualifier TMC26/AT2026).
+        "commission_per_ticket_usd": commission.get("amount"),
         # Checked-bag count and the airline's own fare-brand name (MAIN
         # CABIN, LITE, OPTIMA, ...) — surfaced explicitly, not just filtered,
         # per Michael: he needs to SEE the fare class, not just trust it was
@@ -578,5 +588,5 @@ if __name__ == "__main__":
     print(f"{len(results)} itineraries")
     for it in sorted(results, key=lambda x: x.get("minFareAmount", 9e9))[:5]:
         s = summarize(it)
-        print(f"  ${s['price_usd']:.2f}  {'/'.join(s['airlines'])}  {s['stops']} stops  "
+        print(f"  ${s['price_per_person_usd']:.2f}/person  {'/'.join(s['airlines'])}  {s['stops']} stops  "
               f"{s['legs'][0]['departs_at']} -> {s['legs'][-1]['arrives_at']}")
