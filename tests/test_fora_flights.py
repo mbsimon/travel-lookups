@@ -400,3 +400,28 @@ def test_price_is_labeled_per_person_and_total():
     assert s["price_total_usd"] == 5908.66
     assert s["commission_per_ticket_usd"] == 154
     assert "price_usd" not in s and "commission_usd" not in s
+
+
+def test_flight_numbers_come_from_the_key():
+    it = {"key": "20270528BNAJFKDL4664|20270528JFKNAPDL232"}
+    assert ff.flight_numbers(it) == ["DL4664", "DL232"]
+
+
+def test_has_flights_matches_any_spelling():
+    """The 2027-05-27 BNA-NAP connections Michael found on Google, all sold on Fora."""
+    it = {"key": "20270527BNAATLDL2294|20270527ATLNAPDL278"}
+    assert ff.has_flights(it, ["DL2294", "dl 278"])
+    assert ff.has_flights(it, ["DL0278"])
+    assert not ff.has_flights(it, ["DL2294", "DL232"])
+
+
+def test_a_bad_flight_number_is_an_error():
+    import pytest
+    with pytest.raises(ff.FlightSearchError):
+        ff.normalize_flight("Delta 232")
+
+
+def test_the_default_pool_is_large_enough_to_hold_real_connections():
+    """At 200, UA2848+UA966 (sold, $1,923/pp) was missing from BNA-NAP."""
+    import inspect
+    assert inspect.signature(ff.search_legs).parameters["max_responses"].default >= 1000

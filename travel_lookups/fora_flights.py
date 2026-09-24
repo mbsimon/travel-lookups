@@ -353,6 +353,36 @@ def _cabins_per_leg(itinerary: dict) -> list[list[str]]:
     return out
 
 
+_FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})0*(\d{1,4})$")
+
+
+def flight_numbers(itinerary: dict) -> list[str]:
+    """Every marketed flight in the itinerary, e.g. ["DL4664", "DL232"].
+
+    Read from `key`, which is one `YYYYMMDDORGDSTCCNNNN` token per segment.
+    """
+    out = []
+    for tok in (itinerary.get("key") or "").split("|"):
+        if len(tok) > 14:
+            out.append(tok[14:].upper())
+    return out
+
+
+def normalize_flight(code: str) -> str:
+    """"DL 0232", "dl232" -> "DL232". Raises on something that isn't one."""
+    c = "".join(str(code or "").split()).upper()
+    m = _FLIGHT_RE.match(c)
+    if not m:
+        raise FlightSearchError(f"{code!r} is not a flight number like DL232")
+    return f"{m.group(1)}{int(m.group(2))}"
+
+
+def has_flights(itinerary: dict, wanted: list[str]) -> bool:
+    mine = {normalize_flight(f) for f in flight_numbers(itinerary)
+            if _FLIGHT_RE.match(f)}
+    return all(normalize_flight(w) in mine for w in wanted)
+
+
 def summarize(itinerary: dict) -> dict:
     """Flatten one itinerary into the fields a human actually wants."""
     legs = itinerary.get("legs", [])
@@ -413,6 +443,7 @@ def summarize(itinerary: dict) -> dict:
             }
             for i, leg in enumerate(legs)
         ],
+        "flights": flight_numbers(itinerary),
         "key": itinerary.get("key"),
     }
 
@@ -463,10 +494,11 @@ def search_legs(
     adults: int = 1,
     children: int = 0,
     max_stops: int = 3,
-    max_responses: int = 200,
+    max_responses: int = 1000,
     omit_basic_economy: bool = True,
     exclude_airlines: list[str] | None = None,
     strict_cabin: bool = True,
+    include_airlines: list[str] | None = None,
 ) -> list[dict]:
     """The core call. One-way is a single leg; a round trip is two; a
     multi-city / open-jaw / mixed-cabin trip (e.g. business out, economy
@@ -494,6 +526,13 @@ def search_legs(
     it slipped through anyway. Pass False only when Michael has actually
     asked to see basic economy.
 
+    `max_responses` is how big a pool Fora builds, and it decides which
+    connections exist at all. At 200, BNA-NAP on 2027-05-27 returned 250
+    itineraries and left out UA2848+UA966 (sold, $1,923/pp); pricier but
+    perfectly good connections dropped in and out between identical runs.
+    At 1000 the pool settles (~410) and every connection checked by hand
+    was there. It costs no measurable time (6-10s either way, measured live).
+
     Returns raw itinerary dicts — see `summarize()` to flatten one for
     display (`basic_economy`, `checked_bags`, `fare_brands`). `legs` order
     is the ORDER FLOWN; there's no reordering here.
@@ -517,7 +556,7 @@ def search_legs(
             "speedPriority": 10,
             "tripType": "ML",
             "includeAlliances": [],
-            "includeAirlines": [],
+            "includeAirlines": [a.upper() for a in (include_airlines or [])],
             "excludeAirlines": exclude_airlines if exclude_airlines is not None else CARRIER_BLACKLIST_DEFAULT,
         },
         {"posthogSessionId": "00000000-0000-0000-0000-000000000000"},
