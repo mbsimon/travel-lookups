@@ -226,3 +226,25 @@ def test_the_feeder_allowance_is_premium_economy_only():
     assert not leg_cabin_ok(["S", "Y"], [143, 540], "S"), "PE on the short hop only"
     assert not leg_cabin_ok(["Y", "S"], [143, 540], "Y")
     assert not leg_cabin_ok(["Y", "C"], [143, 540], "C"), "business needs every segment"
+
+
+def test_nonstop_per_leg():
+    """BNA-NAP has no nonstop: say so, don't return an empty list silently."""
+    out = _build(leg_max_stops=[0])
+    assert out["shortlist"] == []
+    assert out["cabins_sold"][0]["nonstop_sold"] is False
+    assert "No nonstop is sold on leg 1" in out["note"]
+    assert any(e["reason"] == "nonstop_only" for e in out["excluded"])
+
+
+def test_leg_limit_overrides_the_top_level_one():
+    one = _build(max_stops=2, leg_max_stops=[1], max_results=50)
+    assert one["shortlist"] and all(r["legs"][0]["stops"] <= 1 for r in one["shortlist"])
+    two = _build(max_stops=1, leg_max_stops=[None], max_results=50)
+    assert all(r["legs"][0]["stops"] <= 1 for r in two["shortlist"])
+
+
+def test_a_nonstop_leg_that_exists_is_kept():
+    pool = _two_leg([(900, ["Y", "Y"])])
+    out = fr.build(pool, fr.Options(cabins=["Y", "Y"], leg_max_stops=[0, 0]))
+    assert out["shortlist"] and out["cabins_sold"][1]["nonstop_sold"]

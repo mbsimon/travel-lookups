@@ -72,11 +72,12 @@ LIFT = {
     "long_layover": "max_layover_minutes (raise it)",
     "overnight_layover": "allow_overnight_layover=true",
     "arrives_two_days_later": "max_date_shift=2",
-    "too_many_stops": "max_stops (raise it)",
+    "too_many_stops": "max_stops (raise it, top level or on the leg)",
+    "nonstop_only": "drop nonstop on that leg",
     "departs_too_early": "depart_after",
     "arrives_too_late": "arrive_before",
 }
-COMFORT = {"short_layover", "long_layover", "overnight_layover",
+COMFORT = {"nonstop_only", "short_layover", "long_layover", "overnight_layover",
            "arrives_two_days_later", "too_many_stops", "departs_too_early",
            "arrives_too_late"}
 
@@ -96,6 +97,7 @@ class Options:
     max_layover_minutes: int | None = MAX_LAYOVER_MINUTES
     max_date_shift: int = 1
     max_stops: int | None = 2
+    leg_max_stops: list[int | None] = field(default_factory=list)   # per leg; 0 = nonstop
     depart_after: list[str | None] = field(default_factory=list)   # "HH:MM" per leg
     arrive_before: list[str | None] = field(default_factory=list)
     flights: list[str] = field(default_factory=list)
@@ -256,8 +258,13 @@ def _comfort(legs: list[dict], o: Options) -> list[tuple[str, str]]:
         if lg["date_shift"] > o.max_date_shift:
             out.append(("arrives_two_days_later",
                         f"arrives {lg['date_shift']} days after departure"))
-        if o.max_stops is not None and lg["stops"] > o.max_stops:
-            out.append(("too_many_stops", f"{lg['stops']} stops"))
+        limit = o.leg_max_stops[i] if i < len(o.leg_max_stops) and \
+            o.leg_max_stops[i] is not None else o.max_stops
+        if limit is not None and lg["stops"] > limit:
+            out.append(("nonstop_only" if limit == 0 else "too_many_stops",
+                        f"{'leg ' + str(i + 1) + ': ' if len(legs) > 1 else ''}"
+                        f"{lg['stops']} stop{'s' if lg['stops'] != 1 else ''}"
+                        + (", nonstop asked" if limit == 0 else f", max {limit}")))
         after = o.depart_after[i] if i < len(o.depart_after) else None
         if after and lg["dep"] and (lg["dep"].hour, lg["dep"].minute) < _hhmm(after):
             out.append(("departs_too_early", f"departs {_clock(lg['dep'])}, before {after}"))
@@ -503,10 +510,15 @@ def build(itineraries: list[dict], o: Options) -> dict:
                       ][:BY_ROUTING_MAX]
 
     sold = _cabins_sold(read, len(o.cabins))
+    # Whether ANY fare in the pool flies this leg nonstop in a usable cabin,
+    # so "nonstop to Naples" can be answered "none is sold" instead of empty.
+    nonstop = [any(len(r["legs"]) > i and r["legs"][i]["stops"] == 0 and not r["correct"]
+                   for r in read) for i in range(len(o.cabins))]
     out = {
         "cabins_sold": [{"leg": i + 1, "requested": CABIN_NAMES.get(o.cabins[i], o.cabins[i]),
                          "sold": sold[i],
-                         "requested_is_sold": CABIN_NAMES.get(o.cabins[i]) in sold[i]}
+                         "requested_is_sold": CABIN_NAMES.get(o.cabins[i]) in sold[i],
+                         "nonstop_sold": nonstop[i]}
                         for i in range(len(o.cabins))],
         "shortlist": [{"rank": i + 1, **_row(r, o)} for i, r in enumerate(shortlist)],
         "anchors": anchors,
@@ -518,12 +530,19 @@ def build(itineraries: list[dict], o: Options) -> dict:
                  "sort": o.sort},
     }
     missing = [c for c in out["cabins_sold"] if not c["requested_is_sold"] and c["sold"]]
+    no_nonstop = [i + 1 for i, lim in enumerate(o.leg_max_stops)
+                  if lim == 0 and i < len(nonstop) and not nonstop[i]]
     if o.strict_cabin and missing:
         out["note"] = " ".join(
             f"No {c['requested'].replace('_', ' ')} is sold on leg {c['leg']} on any routing "
             f"(sold: {', '.join(c['sold'])})." for c in missing) + (
             " Set that leg's cabin to one of those and search again; leave strict_cabin on, "
             "or the other legs can come back in the wrong cabin too.")
+    elif no_nonstop:
+        out["note"] = ("No nonstop is sold on leg" + ("s " if len(no_nonstop) > 1 else " ")
+                       + ", ".join(map(str, no_nonstop))
+                       + " in this cabin on this date. Drop `nonstop` on that leg or set "
+                       "its max_stops to 1.")
     elif o.flights and not routings:
         out["note"] = (f"None of the {len(itineraries)} fares Fora returned contain all of "
                        f"{', '.join(o.flights)}. Fora does not sell those flights together "
