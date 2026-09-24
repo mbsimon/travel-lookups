@@ -353,6 +353,43 @@ def _cabins_per_leg(itinerary: dict) -> list[list[str]]:
     return out
 
 
+# Fare cabin codes that satisfy a requested cabin. Business accepts first
+# because two-cabin US domestic aircraft sell their front cabin as F on
+# business itineraries (seen live: AA CLT-BNA on a MAD-BNA business fare).
+CABIN_ALLOWED = {"Y": {"Y"}, "S": {"S", "W"}, "C": {"C", "J", "F"}, "F": {"F", "P"}}
+
+
+def fare_cabins_per_leg(itinerary: dict, fare: dict) -> list[list[str]]:
+    """One fare's cabinClass, split into one list per requested leg."""
+    flat = fare.get("cabinClass") or []
+    out, i = [], 0
+    for leg in itinerary.get("legs", []):
+        n = max(1, len(leg.get("segmentKeys") or ()))
+        out.append(flat[i:i + n])
+        i += n
+    return out
+
+
+def fare_matches(itinerary: dict, fare: dict, wanted: list[str]) -> bool:
+    """True when EVERY segment of every leg is in that leg's requested cabin.
+
+    The old check read the first segment of each leg on the first fare only,
+    so UA2848+UA966 (economy to Newark, Premium Economy across the Atlantic)
+    passed as an economy fare at $1,923. Cabin belongs to the fare: one Delta
+    routing sells Main, Comfort, Premium Select and Delta One.
+    """
+    per_leg = fare_cabins_per_leg(itinerary, fare)
+    if len(per_leg) != len(wanted):
+        return False
+    return all(c and all(x in CABIN_ALLOWED.get(w, {w}) for x in c)
+               for c, w in zip(per_leg, wanted))
+
+
+def sells_cabins(itinerary: dict, wanted: list[str]) -> bool:
+    return any(fare_matches(itinerary, fa, wanted)
+               for fa in itinerary.get("itineraryFares") or [])
+
+
 _FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})0*(\d{1,4})$")
 
 
@@ -381,6 +418,16 @@ def has_flights(itinerary: dict, wanted: list[str]) -> bool:
     mine = {normalize_flight(f) for f in flight_numbers(itinerary)
             if _FLIGHT_RE.match(f)}
     return all(normalize_flight(w) in mine for w in wanted)
+
+
+def leg_layovers(leg: dict) -> list[dict]:
+    """[{"airport": "EWR", "minutes": 77}, ...] from the leg's own timeline."""
+    out = []
+    for t in leg.get("timeline") or []:
+        if t.get("type") == "layover":
+            locs = t.get("locations") or [""]
+            out.append({"airport": "/".join(locs), "minutes": t.get("elapsedTime")})
+    return out
 
 
 def summarize(itinerary: dict) -> dict:
@@ -440,6 +487,8 @@ def summarize(itinerary: dict) -> dict:
                 "equipment": leg.get("equipmentCodes"),
                 "redeye": leg.get("redeye"),
                 "stops": len(leg.get("stopLocation", [])),
+                "elapsed_minutes": leg.get("elapsedTime"),
+                "layovers": leg_layovers(leg),
             }
             for i, leg in enumerate(legs)
         ],
@@ -489,6 +538,19 @@ def _post_search(url: str, body: str, cookies: dict) -> dict:
     raise AssertionError("unreachable")  # the loop always returns or raises
 
 
+# Sabre's alliance codes. The request rejects anything else as schema-invalid.
+ALLIANCE_CODES = {"star": "*A", "star-alliance": "*A", "star alliance": "*A", "*a": "*A",
+                  "oneworld": "*O", "one world": "*O", "*o": "*O",
+                  "skyteam": "*S", "sky team": "*S", "*s": "*S"}
+
+
+def _alliance_code(name: str) -> str:
+    code = ALLIANCE_CODES.get(str(name or "").strip().lower())
+    if not code:
+        raise FlightSearchError(f"Unknown alliance {name!r}: use star, oneworld or skyteam")
+    return code
+
+
 def search_legs(
     legs: list[Leg],
     adults: int = 1,
@@ -499,6 +561,7 @@ def search_legs(
     exclude_airlines: list[str] | None = None,
     strict_cabin: bool = True,
     include_airlines: list[str] | None = None,
+    include_alliances: list[str] | None = None,
 ) -> list[dict]:
     """The core call. One-way is a single leg; a round trip is two; a
     multi-city / open-jaw / mixed-cabin trip (e.g. business out, economy
@@ -555,7 +618,7 @@ def search_legs(
             "passengers": {"adults": adults, "children": children, "seats": adults + children},
             "speedPriority": 10,
             "tripType": "ML",
-            "includeAlliances": [],
+            "includeAlliances": [_alliance_code(x) for x in (include_alliances or [])],
             "includeAirlines": [a.upper() for a in (include_airlines or [])],
             "excludeAirlines": exclude_airlines if exclude_airlines is not None else CARRIER_BLACKLIST_DEFAULT,
         },
@@ -567,10 +630,7 @@ def search_legs(
     itineraries = data.get("itineraries", [])
     if strict_cabin:
         wanted = [leg.code for leg in legs]
-        itineraries = [
-            it for it in itineraries
-            if [chunk[0] for chunk in _cabins_per_leg(it) if chunk] == wanted
-        ]
+        itineraries = [it for it in itineraries if sells_cabins(it, wanted)]
     if omit_basic_economy:
         itineraries = [it for it in itineraries if not _is_basic_economy(_fare0(it))]
     return itineraries

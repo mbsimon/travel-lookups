@@ -425,3 +425,19 @@ def test_the_default_pool_is_large_enough_to_hold_real_connections():
     """At 200, UA2848+UA966 (sold, $1,923/pp) was missing from BNA-NAP."""
     import inspect
     assert inspect.signature(ff.search_legs).parameters["max_responses"].default >= 1000
+
+
+def test_layovers_are_read_from_the_leg_timeline():
+    leg = {"timeline": [{"type": "air"}, {"type": "layover", "locations": ["EWR"],
+                                          "elapsedTime": 77}, {"type": "air"}]}
+    assert ff.leg_layovers(leg) == [{"airport": "EWR", "minutes": 77}]
+
+
+
+
+def test_alliances_use_sabres_codes():
+    """Sabre rejects "skyteam" as schema-invalid; it wants *S."""
+    assert [ff._alliance_code(a) for a in ("SkyTeam", "oneworld", "star")] == ["*S", "*O", "*A"]
+    import pytest
+    with pytest.raises(ff.FlightSearchError):
+        ff._alliance_code("vanilla")
