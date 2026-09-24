@@ -166,3 +166,63 @@ def test_by_routing_is_capped_and_best_first():
     out = _build()
     assert 0 < len(out["by_routing"]) <= fr.BY_ROUTING_MAX
     assert out["by_routing"][0]["routing"].startswith("DL via ATL")
+
+
+def _two_leg(fares):
+    legs = [{"origin": "BNA", "destination": "NAP", "segmentKeys": ["a"], "timeline": [
+                {"type": "air", "locations": ["BNA", "NAP"], "startsAt": "2027-05-27T12:00:00-05:00"}],
+             "departsAt": "2027-05-27T12:00:00-05:00", "arrivesAt": "2027-05-28T08:00:00+02:00",
+             "elapsedTime": 600},
+            {"origin": "NAP", "destination": "BCN", "segmentKeys": ["b"], "timeline": [
+                {"type": "air", "locations": ["NAP", "BCN"], "startsAt": "2027-06-01T09:00:00+02:00"}],
+             "departsAt": "2027-06-01T09:00:00+02:00", "arrivesAt": "2027-06-01T11:00:00+02:00",
+             "elapsedTime": 120}]
+    return [{"key": "20270527BNANAPXX1|20270601NAPBCNXX2", "legs": legs,
+             "itineraryFares": [{"rawFare": p, "cabinClass": c, "baggage": 1,
+                                 "totalFare": {"totalPrice": p}} for p, c in fares]}]
+
+
+def test_a_leg_without_the_cabin_says_so_and_names_what_is_sold():
+    """NAP-BCN has no premium economy. Relaxing strict_cabin for the whole trip
+    would let the transatlantic come back in economy; change that leg instead."""
+    pool = _two_leg([(900, ["Y", "Y"]), (1500, ["S", "Y"]), (3000, ["S", "C"])])
+    out = fr.build(pool, fr.Options(cabins=["S", "S"]))
+    assert out["shortlist"] == []
+    leg2 = out["cabins_sold"][1]
+    assert leg2["sold"] == ["economy", "business"] and not leg2["requested_is_sold"]
+    assert "leg 2" in out["note"] and "strict_cabin" in out["note"]
+    fixed = fr.build(pool, fr.Options(cabins=["S", "Y"]))
+    assert fixed["shortlist"][0]["price_per_person_usd"] == 1500
+
+
+def test_domestic_first_on_a_business_leg_counts_as_business_sold():
+    two = _two_leg([(5000, ["C", "C"])])
+    two[0]["legs"][0]["segmentKeys"] = ["a1", "a2"]
+    two[0]["itineraryFares"][0]["cabinClass"] = ["F", "C", "C"]
+    assert "business" in fr.build(two, fr.Options(cabins=["C", "C"]))["cabins_sold"][0]["sold"]
+
+
+def test_the_default_layover_cap_is_michaels_three_hours():
+    assert fr.Options(cabins=["Y"]).max_layover_minutes == 180
+    out = _build(max_results=50)
+    for r in out["shortlist"]:
+        for leg in r["legs"]:
+            assert all(l["minutes"] <= 180 for l in leg["layovers"]), _flights(r)
+
+
+def test_premium_economy_counts_with_an_economy_feeder():
+    """Delta sells BNA-JFK-NAP Premium Select as Y/S: no PE cabin on the regional jet."""
+    out = fr.build(POOL, fr.Options(cabins=["S"], adults=2))
+    assert "premium_economy" in out["cabins_sold"][0]["sold"]
+    assert out["shortlist"], "real premium economy itineraries exist on this route"
+    top = out["shortlist"][0]
+    assert "S" in top["cabins"][0]
+
+
+def test_the_feeder_allowance_is_premium_economy_only():
+    """Economy still means economy everywhere: UA966 in PE is not economy."""
+    from travel_lookups.fora_flights import leg_cabin_ok
+    assert leg_cabin_ok(["Y", "S"], [143, 540], "S")
+    assert not leg_cabin_ok(["S", "Y"], [143, 540], "S"), "PE on the short hop only"
+    assert not leg_cabin_ok(["Y", "S"], [143, 540], "Y")
+    assert not leg_cabin_ok(["Y", "C"], [143, 540], "C"), "business needs every segment"

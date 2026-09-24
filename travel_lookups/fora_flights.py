@@ -370,6 +370,32 @@ def fare_cabins_per_leg(itinerary: dict, fare: dict) -> list[list[str]]:
     return out
 
 
+def leg_cabin_ok(cabins: list[str], minutes: list[int] | None, wanted: str) -> bool:
+    """Is this leg, as one fare sells it, in the requested cabin?
+
+    Economy, business and first: every segment. Premium economy: the LONGEST
+    segment must be premium economy and the rest may be economy, because the
+    feeder into a transatlantic premium economy cabin is a regional or
+    narrowbody jet that has none. Delta sells BNA-JFK-NAP Premium Select as
+    "Y/S"; requiring S on every segment excluded every real premium economy
+    itinerary from a US interior city.
+    """
+    if not cabins:
+        return False
+    allowed = CABIN_ALLOWED.get(wanted, {wanted})
+    if wanted != "S":
+        return all(c in allowed for c in cabins)
+    mins = list(minutes or [])
+    main = max(range(len(cabins)), key=lambda i: mins[i] if i < len(mins) else 0)
+    return cabins[main] in allowed and all(c in allowed | {"Y"} for c in cabins)
+
+
+def segment_minutes(itinerary: dict) -> list[list[int]]:
+    """Flight time of each air segment, per leg, from the leg timeline."""
+    return [[int(t.get("elapsedTime") or 0) for t in leg.get("timeline") or []
+             if t.get("type") == "air"] for leg in itinerary.get("legs", [])]
+
+
 def fare_matches(itinerary: dict, fare: dict, wanted: list[str]) -> bool:
     """True when EVERY segment of every leg is in that leg's requested cabin.
 
@@ -381,8 +407,9 @@ def fare_matches(itinerary: dict, fare: dict, wanted: list[str]) -> bool:
     per_leg = fare_cabins_per_leg(itinerary, fare)
     if len(per_leg) != len(wanted):
         return False
-    return all(c and all(x in CABIN_ALLOWED.get(w, {w}) for x in c)
-               for c, w in zip(per_leg, wanted))
+    mins = segment_minutes(itinerary)
+    return all(leg_cabin_ok(c, mins[i] if i < len(mins) else None, w)
+               for i, (c, w) in enumerate(zip(per_leg, wanted)))
 
 
 def sells_cabins(itinerary: dict, wanted: list[str]) -> bool:

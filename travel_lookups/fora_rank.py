@@ -37,7 +37,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .fora_flights import (CABIN_ALLOWED, FlightSearchError, flight_numbers,
-                           has_flights, normalize_flight, _is_basic_economy)
+                           has_flights, leg_cabin_ok, normalize_flight,
+                           _is_basic_economy)
 
 H_SHARE_OF_P25 = 0.08
 H_FLOOR_USD = 40.0
@@ -52,11 +53,18 @@ PENALTY_EARLY = 1.0
 LATE_ARRIVAL_FROM, LATE_ARRIVAL_UNTIL = 21, 5
 PENALTY_LATE = 2.0
 OVERNIGHT_LAYOVER_MIN = 240
+# Michael's rule: no layover over three hours unless he asks for one.
+MAX_LAYOVER_MINUTES = 180
+CABIN_NAMES = {"Y": "economy", "S": "premium_economy", "W": "premium_economy",
+               "C": "business", "J": "business", "F": "first", "P": "first"}
 BY_ROUTING_MAX = 15
 
 # Exclusions an agent can lift, and how.
 LIFT = {
-    "cabin": "strict_cabin=false",
+    # Change the cabin on the leg that lacks it (see `cabins_sold`).
+    # strict_cabin=false relaxes EVERY leg, so a premium economy transatlantic
+    # can come back priced in economy.
+    "cabin": "set that leg's cabin to one listed in cabins_sold",
     "basic_economy": "allow_basic_economy=true",
     "not_refundable": "refundable_only=false",
     "airport_change": "allow_airport_change=true",
@@ -85,7 +93,7 @@ class Options:
     allow_airport_change: bool = False
     allow_overnight_layover: bool = False
     min_layover_minutes: int | None = 45
-    max_layover_minutes: int | None = 300
+    max_layover_minutes: int | None = MAX_LAYOVER_MINUTES
     max_date_shift: int = 1
     max_stops: int | None = 2
     depart_after: list[str | None] = field(default_factory=list)   # "HH:MM" per leg
@@ -133,11 +141,12 @@ def _mins(m: int) -> str:
 def _legs(it: dict) -> list[dict]:
     out = []
     for leg in it.get("legs") or []:
-        segs, lays = [], []
+        segs, lays, seg_min = [], [], []
         for t in leg.get("timeline") or []:
             if t.get("type") == "air":
                 locs = t.get("locations") or ["", ""]
                 segs.append((locs[0], locs[-1], t.get("startsAt")))
+                seg_min.append(int(t.get("elapsedTime") or 0))
             elif t.get("type") == "layover":
                 locs = t.get("locations") or [""]
                 start, end = _dt(t.get("startsAt")), _dt(t.get("endsAt"))
@@ -153,7 +162,7 @@ def _legs(it: dict) -> list[dict]:
             "elapsed": int(leg.get("elapsedTime") or 0),
             "stops": len(leg.get("stopLocation") or []),
             "date_shift": int(leg.get("dateShift") or 0),
-            "segments": segs, "layovers": lays,
+            "segments": segs, "layovers": lays, "segment_minutes": seg_min,
             "n_segments": max(1, len(leg.get("segmentKeys") or ()) or len(segs)),
             "airline": leg.get("marketingAirline"),
             "operated_by": list(dict.fromkeys(leg.get("operatingAirlines") or [])),
@@ -180,6 +189,7 @@ def _fare(fa: dict, legs: list[dict]) -> dict:
         "basic_economy": _is_basic_economy(fa),
         "cabins": ["/".join(dict.fromkeys(c)) for c in cabins],
         "_cabins": cabins,
+        "_minutes": [lg["segment_minutes"] for lg in legs],
         "seats_left": min(seats) if seats else None,
         "commission_per_ticket_usd": (fa.get("commission") or {}).get("amount"),
     }
@@ -188,8 +198,8 @@ def _fare(fa: dict, legs: list[dict]) -> dict:
 def _cabin_ok(fare: dict, wanted: list[str]) -> bool:
     if len(fare["_cabins"]) != len(wanted):
         return False
-    return all(c and all(x in CABIN_ALLOWED.get(w, {w}) for x in c)
-               for c, w in zip(fare["_cabins"], wanted))
+    return all(leg_cabin_ok(c, m, w)
+               for c, m, w in zip(fare["_cabins"], fare["_minutes"], wanted))
 
 
 def _read(it: dict, o: Options) -> dict:
@@ -349,6 +359,30 @@ def _brief(r: dict) -> dict:
                                      for lg in r["legs"] for lay in lg["layovers"])}
 
 
+def _cabins_sold(read: list[dict], n_legs: int) -> list[list[str]]:
+    """Per leg, every cabin some fare sells on ALL of that leg's flights.
+
+    NAP-BCN has no premium economy: short intra-Europe flights sell economy
+    and business. Saying so per leg is what lets an agent change one leg's
+    cabin instead of relaxing the cabin rule for the whole trip.
+    """
+    order = ["economy", "premium_economy", "business", "first"]
+    code = {"economy": "Y", "premium_economy": "S", "business": "C", "first": "F"}
+    out = [set() for _ in range(n_legs)]
+    for r in read:
+        for f in r["fares"]:
+            for i, segs in enumerate(f["_cabins"][:n_legs]):
+                if not segs:
+                    continue
+                # The same rule the cabin match uses, so "sold" and
+                # "would match" can never disagree.
+                for name in order:
+                    if leg_cabin_ok(segs, f["_minutes"][i], code[name]) and not (
+                            name == "business" and all(c in ("F", "P") for c in segs)):
+                        out[i].add(name)
+    return [sorted(s, key=order.index) for s in out]
+
+
 def build(itineraries: list[dict], o: Options) -> dict:
     """The whole answer for one search. See the module docstring."""
     read = [_read(it, o) for it in itineraries]
@@ -468,7 +502,12 @@ def build(itineraries: list[dict], o: Options) -> dict:
                       for k, v in sorted(by_routing.items(), key=lambda kv: kv[1]["_best"])
                       ][:BY_ROUTING_MAX]
 
+    sold = _cabins_sold(read, len(o.cabins))
     out = {
+        "cabins_sold": [{"leg": i + 1, "requested": CABIN_NAMES.get(o.cabins[i], o.cabins[i]),
+                         "sold": sold[i],
+                         "requested_is_sold": CABIN_NAMES.get(o.cabins[i]) in sold[i]}
+                        for i in range(len(o.cabins))],
         "shortlist": [{"rank": i + 1, **_row(r, o)} for i, r in enumerate(shortlist)],
         "anchors": anchors,
         "by_routing": by_routing_out,
@@ -478,7 +517,14 @@ def build(itineraries: list[dict], o: Options) -> dict:
                  "ranked": len(ok), "hour_value_usd": round(H),
                  "sort": o.sort},
     }
-    if o.flights and not routings:
+    missing = [c for c in out["cabins_sold"] if not c["requested_is_sold"] and c["sold"]]
+    if o.strict_cabin and missing:
+        out["note"] = " ".join(
+            f"No {c['requested'].replace('_', ' ')} is sold on leg {c['leg']} on any routing "
+            f"(sold: {', '.join(c['sold'])})." for c in missing) + (
+            " Set that leg's cabin to one of those and search again; leave strict_cabin on, "
+            "or the other legs can come back in the wrong cabin too.")
+    elif o.flights and not routings:
         out["note"] = (f"None of the {len(itineraries)} fares Fora returned contain all of "
                        f"{', '.join(o.flights)}. Fora does not sell those flights together "
                        "as one fare on this date.")
