@@ -342,6 +342,7 @@ def serpapi_configured() -> bool:
 
 def _leg(flight: dict) -> dict:
     return {"flight": flight.get("flight_number"), "airline": flight.get("airline"),
+            "also_sold_by": flight.get("ticket_also_sold_by") or [],
             "from": (flight.get("departure_airport") or {}).get("id"),
             "depart": (flight.get("departure_airport") or {}).get("time"),
             "to": (flight.get("arrival_airport") or {}).get("id"),
@@ -350,9 +351,23 @@ def _leg(flight: dict) -> dict:
             "duration_minutes": flight.get("duration")}
 
 
-def _itinerary(option: dict) -> dict:
+def _itinerary(option: dict, tickets: int = 1) -> dict:
+    """One Google Flights option. `price` from SerpApi is the PARTY total.
+
+    DL2294+DL278 read $2,092 at 2 adults and $1,046 at 1 (checked live
+    2026-09-25). Read as per person, a party total made a business quote look
+    twice as expensive as Fora's; read the other way it halves. Both figures are
+    named here, and `price` stays one release for callers that read it.
+    """
     legs = [_leg(f) for f in option.get("flights") or []]
+    total = option.get("price")
+    tickets = max(int(tickets or 1), 1)
     return {"legs": legs, "stops": max(len(legs) - 1, 0),
+            "party_total_usd": total, "tickets": tickets,
+            "per_person_usd": round(total / tickets, 2) if isinstance(total, (int, float)) else None,
+            "booking_token": option.get("booking_token"),
+            "departure_token": option.get("departure_token"),
+            "extensions": option.get("extensions") or [],
             "layovers": [{"airport": lay.get("id"), "minutes": lay.get("duration"),
                           "overnight": lay.get("overnight", False)}
                          for lay in option.get("layovers") or []],
@@ -402,8 +417,14 @@ def _serpapi_spend() -> None:
 def itineraries(origin: str, destination: str, outbound_date: str,
                 return_date: str | None = None, adults: int = 1,
                 cabin: str = "economy", max_stops: str = "any",
-                override_budget: bool = False) -> dict:
-    """Bookable routings including connections, with fares. Spends a SerpApi search."""
+                override_budget: bool = False, currency: str | None = None,
+                children: int = 0) -> dict:
+    """Bookable routings including connections, with fares. Spends a SerpApi search.
+
+    Each itinerary carries `party_total_usd` (what SerpApi calls `price`: the
+    whole party), `per_person_usd` and `tickets`. `currency` forces a currency;
+    a comparison with Fora must pass "USD" because Fora prices in dollars.
+    """
     budget = serpapi_budget()
     if budget["spendable"] <= 0 and not override_budget:
         return {"configured": True, "budget": budget, "error": (
@@ -422,6 +443,7 @@ def itineraries(origin: str, destination: str, outbound_date: str,
     # Non-US routes keep the EUR/Spain default. Fails soft to the default on
     # an airport-lookup error; a currency mismatch is a cosmetic problem, not
     # a reason to drop the whole search.
+    forced = currency
     currency, market = DEFAULT_CURRENCY, DEFAULT_MARKET
     try:
         touches_us = any(airport(code).get("country") == "US"
@@ -430,11 +452,14 @@ def itineraries(origin: str, destination: str, outbound_date: str,
             currency, market = "USD", "us"
     except Exception:
         pass
+    if forced:
+        currency = forced.upper()
+        market = "us" if currency == "USD" else market
 
     params = {"engine": "google_flights", "api_key": key,
               "departure_id": origin.strip().upper(),
               "arrival_id": destination.strip().upper(),
-              "outbound_date": outbound_date, "adults": adults,
+              "outbound_date": outbound_date, "adults": adults, "children": children,
               "travel_class": CABIN_CODES.get(cabin.lower(), 1),
               "stops": STOP_CODES.get(max_stops.lower(), 0),
               "currency": currency, "hl": DEFAULT_LANGUAGE, "gl": market}
@@ -462,7 +487,10 @@ def itineraries(origin: str, destination: str, outbound_date: str,
             "destination": destination.strip().upper(),
             "outbound_date": outbound_date, "return_date": return_date,
             "currency": currency,
-            "itineraries": [_itinerary(o) for o in options], "count": len(options),
-            "price_context": {"lowest": insights.get("lowest_price"),
+            "tickets": adults + children,
+            "itineraries": [_itinerary(o, adults + children) for o in options],
+            "count": len(options),
+            "price_context": {"lowest_party_total": insights.get("lowest_price"),
                               "level": insights.get("price_level"),
-                              "typical_range": insights.get("typical_price_range")}}
+                              "typical_range_party_total": insights.get("typical_price_range"),
+                              "note": "Party totals for all passengers searched."}}

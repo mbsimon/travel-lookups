@@ -318,3 +318,8 @@ def test_an_airport_change_is_caught_with_or_without_fora_labeling_it():
         assert out["excluded"][0]["reason"] == "airport_change"
         ok = fr.build(_milan(label), fr.Options(cabins=["Y"], allow_airport_change=True))
         assert ok["shortlist"], label
+
+
+def test_rows_carry_the_ticketing_deadline():
+    row = _build()["shortlist"][0]
+    assert row["last_ticket_date"] and all("last_ticket_date" in f for f in row["fare_options"])

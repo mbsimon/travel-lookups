@@ -212,6 +212,8 @@ def _fare(fa: dict, legs: list[dict]) -> dict:
         "_minutes": [lg["segment_minutes"] for lg in legs],
         "seats_left": min(seats) if seats else None,
         "commission_per_ticket_usd": (fa.get("commission") or {}).get("amount"),
+        # Most fares must be ticketed within one to three days of the search.
+        "last_ticket_date": fa.get("lastTicketDate"),
         **_terms(fa),
     }
 
@@ -376,6 +378,7 @@ def _row(r: dict, o: Options) -> dict:
     return {
         "client_quote": client_quote(r, pax),
         "commission_total_usd": round(per * pax, 2) if per is not None else None,
+        "last_ticket_date": f.get("last_ticket_date"),
         "flights": r["flights"],
         "also_sold_as": r.get("twins", []),
         "price_per_person_usd": f.get("price_per_person_usd"),
