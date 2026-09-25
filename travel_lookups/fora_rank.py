@@ -144,6 +144,7 @@ def _legs(it: dict) -> list[dict]:
     out = []
     for leg in it.get("legs") or []:
         segs, lays, seg_min = [], [], []
+        air = [t for t in leg.get("timeline") or [] if t.get("type") == "air"]
         for t in leg.get("timeline") or []:
             if t.get("type") == "air":
                 locs = t.get("locations") or ["", ""]
@@ -157,6 +158,23 @@ def _legs(it: dict) -> list[dict]:
                              "airport_change": len(locs) > 1,
                              "overnight": bool(start and end and start.date() != end.date()
                                                and m >= OVERNIGHT_LAYOVER_MIN)})
+        # Second, independent check for an airport change: a flight landing at
+        # one airport and the next leaving from another (NAP->LIN, then
+        # MXP->JFK, which Fora sells as one ticket). It does not rely on the
+        # layover's own label, so a missing label cannot let one through.
+        for k, (x, y) in enumerate(zip(air, air[1:])):
+            arrive, depart = (x.get("locations") or [""])[-1], (y.get("locations") or [""])[0]
+            if not (arrive and depart and arrive != depart):
+                continue
+            if k < len(lays):           # the layover between these two flights
+                lays[k]["airport_change"] = True
+                lays[k]["airport"] = f"{arrive}/{depart}"
+            else:
+                landed, leaves = _dt(x.get("startsAt")), _dt(y.get("startsAt"))
+                gap = (int((leaves - landed).total_seconds() // 60) - int(x.get("elapsedTime") or 0)
+                       if landed and leaves else 0)
+                lays.append({"airport": f"{arrive}/{depart}", "minutes": max(0, gap),
+                             "airport_change": True, "overnight": False})
         out.append({
             "origin": leg.get("origin"), "destination": leg.get("destination"),
             "departs_at": leg.get("departsAt"), "arrives_at": leg.get("arrivesAt"),

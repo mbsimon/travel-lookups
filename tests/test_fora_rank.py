@@ -290,3 +290,31 @@ def test_airports_summary_only_when_there_is_a_choice():
         it["legs"] = [dict(it["legs"][0], origin="XXX")]
     out = fr.build(two, fr.Options(cabins=["Y"], adults=2, max_layover_minutes=None))
     assert {a["from"] for a in out["airports"]} >= {"XXX"}
+
+
+def _milan(label: bool):
+    """NAP->LIN then MXP->JFK: sold by Fora as one ticket, seen live 2026-09-25."""
+    tl = [{"type": "air", "locations": ["NAP", "LIN"], "startsAt": "2027-06-03T07:00:00+02:00",
+           "elapsedTime": 95},
+          {"type": "layover", "elapsedTime": 150,
+           "locations": ["LIN", "MXP"] if label else ["LIN"],
+           "startsAt": "2027-06-03T08:35:00+02:00", "endsAt": "2027-06-03T11:05:00+02:00"},
+          {"type": "air", "locations": ["MXP", "JFK"], "startsAt": "2027-06-03T11:05:00+02:00",
+           "elapsedTime": 540}]
+    return [{"key": "20270603NAPLINAZ1298|20270603MXPJFKAA199",
+             "legs": [{"origin": "NAP", "destination": "JFK", "segmentKeys": ["a", "b"],
+                       "stopLocation": ["LIN"], "timeline": tl, "elapsedTime": 785,
+                       "departsAt": "2027-06-03T07:00:00+02:00",
+                       "arrivesAt": "2027-06-03T13:05:00-04:00"}],
+             "itineraryFares": [{"rawFare": 700, "cabinClass": ["Y", "Y"], "baggage": 1,
+                                 "totalFare": {"totalPrice": 700}}]}]
+
+
+def test_an_airport_change_is_caught_with_or_without_fora_labeling_it():
+    """Michael: never MXP in, LIN out for an ordinary connection unless asked."""
+    for label in (True, False):
+        out = fr.build(_milan(label), fr.Options(cabins=["Y"]))
+        assert out["shortlist"] == [], label
+        assert out["excluded"][0]["reason"] == "airport_change"
+        ok = fr.build(_milan(label), fr.Options(cabins=["Y"], allow_airport_change=True))
+        assert ok["shortlist"], label
