@@ -41,7 +41,10 @@ PROFILE_DIR = os.path.expanduser("~/.config/michaelsimon/chrome-fora-debug")
 
 def _save_cookies(context):
     cookies = [
-        {"name": c["name"], "value": c["value"], "domain": c["domain"], "path": c["path"]}
+        # `expires` is what travel-mcp's daily check reads to warn a week
+        # before this login runs out.
+        {"name": c["name"], "value": c["value"], "domain": c["domain"], "path": c["path"],
+         "expires": c.get("expires")}
         for c in context.cookies()
         if c["domain"].endswith("flights.fora.travel")
     ]
