@@ -194,7 +194,36 @@ def _fare(fa: dict, legs: list[dict]) -> dict:
         "_minutes": [lg["segment_minutes"] for lg in legs],
         "seats_left": min(seats) if seats else None,
         "commission_per_ticket_usd": (fa.get("commission") or {}).get("amount"),
+        **_terms(fa),
     }
+
+
+def _terms(fa: dict) -> dict:
+    """Change and refund rules in words, from the fare's own penalty list."""
+    pens = fa.get("penalties") or []
+
+    def pick(kind, when):
+        return next((p for p in pens if p.get("type") == kind
+                     and p.get("applicability") == when), None)
+
+    ex, rf = pick("Exchange", "Before"), pick("Refund", "Before")
+    if ex is None:
+        changes = "change rules not returned; confirm at booking"
+    elif ex.get("changeable") is False:
+        changes = "no changes"
+    else:
+        fee = ex.get("amount")
+        changes = ("changes allowed, no fee" if not fee
+                   else f"changes allowed for a ${fee:,.0f} fee plus any fare difference")
+    if fa.get("refundableBefore") or (rf and rf.get("refundable") and not rf.get("amount")):
+        refund = "fully refundable before departure"
+    elif rf and rf.get("refundable"):
+        refund = f"refundable less a ${rf.get('amount', 0):,.0f} fee"
+    elif rf is None:
+        refund = "refund rules not returned; confirm at booking"
+    else:
+        refund = "non-refundable"
+    return {"changes": changes, "refund": refund}
 
 
 def _cabin_ok(fare: dict, wanted: list[str]) -> bool:
@@ -325,7 +354,10 @@ def _row(r: dict, o: Options) -> dict:
     f = r["fare"] or {}
     pax = o.adults + o.children
     seats = f.get("seats_left")
+    per = f.get("commission_per_ticket_usd")
     return {
+        "client_quote": client_quote(r, pax),
+        "commission_total_usd": round(per * pax, 2) if per is not None else None,
         "flights": r["flights"],
         "also_sold_as": r.get("twins", []),
         "price_per_person_usd": f.get("price_per_person_usd"),
@@ -357,6 +389,59 @@ def _row(r: dict, o: Options) -> dict:
     }
 
 
+AIRLINES = {
+    "AA": "American", "AC": "Air Canada", "AF": "Air France", "AS": "Alaska",
+    "AY": "Finnair", "AZ": "ITA Airways", "B6": "JetBlue", "BA": "British Airways",
+    "DL": "Delta", "EI": "Aer Lingus", "EK": "Emirates", "IB": "Iberia", "KL": "KLM",
+    "LH": "Lufthansa", "LX": "Swiss", "OS": "Austrian", "QR": "Qatar Airways",
+    "SN": "Brussels Airlines", "TK": "Turkish Airlines", "TP": "TAP Air Portugal",
+    "UA": "United", "UX": "Air Europa", "VS": "Virgin Atlantic", "WS": "WestJet",
+    "9E": "Delta Connection", "YX": "Delta Connection", "OH": "American Eagle",
+    "MQ": "American Eagle", "OO": "SkyWest", "G7": "United Express",
+}
+CABIN_WORDS = {"Y": "economy", "S": "premium economy", "W": "premium economy",
+               "C": "business", "J": "business", "F": "first", "P": "first"}
+
+
+def _when(dt: datetime | None) -> str:
+    if not dt:
+        return "?"
+    h = dt.strftime("%I:%M%p").lstrip("0").lower()
+    return f"{dt.strftime('%a %b')} {dt.day}, {h}"
+
+
+def client_quote(r: dict, travelers: int) -> str:
+    """A block Michael can paste into a client email.
+
+    No commission, no agency identifiers, and the price is the party total,
+    because a per-ticket figure or a commission line one copy-paste away from
+    a client is how they leak.
+    """
+    f = r["fare"] or {}
+    lines = []
+    for i, lg in enumerate(r["legs"]):
+        cab = f.get("_cabins", [[]])[i] if i < len(f.get("_cabins", [])) else []
+        cabin = " / ".join(dict.fromkeys(CABIN_WORDS.get(c, c) for c in cab)) or "economy"
+        via = ", ".join(f"{lay['airport']} ({_mins(lay['minutes'])})" for lay in lg["layovers"])
+        airline = AIRLINES.get(lg["airline"], lg["airline"] or "")
+        ops = [AIRLINES.get(x, x) for x in lg["operated_by"] if x != lg["airline"]]
+        lines.append(
+            f"{airline} {lg['origin']} to {lg['destination']}, {cabin}: departs "
+            f"{_when(lg['dep'])}, arrives {_when(lg['arr'])}; "
+            + (f"connects in {via}" if via else "nonstop")
+            + (f" (operated by {', '.join(dict.fromkeys(ops))})" if ops else "") + ".")
+    brands = ", ".join(f.get("brands") or [])
+    bags = f.get("checked_bags")
+    terms = [f"{bags} checked bag{'s' if bags != 1 else ''} per person" if bags else None,
+             f.get("changes"), f.get("refund")]
+    total = f.get("price_total_usd")
+    lines.append(f"Fare: {brands}. " + "; ".join(t for t in terms if t) + ".")
+    if total is not None:
+        lines.append(f"Total for {travelers} traveler{'s' if travelers != 1 else ''}: "
+                     f"${total:,.2f}, taxes included. Fares change until ticketed.")
+    return "\n".join(lines)
+
+
 def _brief(r: dict) -> dict:
     f = r["fare"] or {}
     return {"flights": "+".join(r["flights"]),
@@ -364,6 +449,29 @@ def _brief(r: dict) -> dict:
             "elapsed": _mins(r["elapsed"]), "stops": r["stops"],
             "connections": ", ".join(f"{lay['airport']} {_mins(lay['minutes'])}"
                                      for lg in r["legs"] for lay in lg["layovers"])}
+
+
+def _airports(ok: list[dict], key) -> list[dict]:
+    """Per leg, the airports actually flown when a city code (NYC) spans
+    several, with the cheapest and best (effective price) option from each. Empty when
+    every routing uses the same pair, so it only speaks when there is a choice.
+    """
+    out = []
+    n = max((len(r["legs"]) for r in ok), default=0)
+    for i in range(n):
+        by = defaultdict(list)
+        for r in ok:
+            lg = r["legs"][i]
+            by[(lg["origin"], lg["destination"])].append(r)
+        if len(by) < 2:
+            continue
+        for (a, b), rs in sorted(by.items(), key=lambda kv: min(key(r) for r in kv[1])):
+            out.append({"leg": i + 1, "from": a, "to": b, "routings": len(rs),
+                        "cheapest_per_person_usd": min(r["fare"]["price_per_person_usd"]
+                                                       for r in rs),
+                        "best_effective_per_person_usd": round(min(
+                            r.get("effective", r["fare"]["price_per_person_usd"]) for r in rs))})
+    return out
 
 
 def _cabins_sold(read: list[dict], n_legs: int) -> list[list[str]]:
@@ -523,6 +631,7 @@ def build(itineraries: list[dict], o: Options) -> dict:
         "shortlist": [{"rank": i + 1, **_row(r, o)} for i, r in enumerate(shortlist)],
         "anchors": anchors,
         "by_routing": by_routing_out,
+        "airports": _airports(ok, key),
         "excluded": [{"reason": k, "routings": v, "lift_with": LIFT[k]}
                      for k, v in excluded.most_common()],
         "pool": {"fares": len(itineraries), "physical_routings": len(routings),

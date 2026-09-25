@@ -248,3 +248,45 @@ def test_a_nonstop_leg_that_exists_is_kept():
     pool = _two_leg([(900, ["Y", "Y"])])
     out = fr.build(pool, fr.Options(cabins=["Y", "Y"], leg_max_stops=[0, 0]))
     assert out["shortlist"] and out["cabins_sold"][1]["nonstop_sold"]
+
+
+def test_terms_read_from_penalties():
+    t = fr._terms({"penalties": [
+        {"type": "Refund", "applicability": "Before", "refundable": False},
+        {"type": "Exchange", "applicability": "Before", "changeable": True, "amount": 57}]})
+    assert t == {"changes": "changes allowed for a $57 fee plus any fare difference",
+                 "refund": "non-refundable"}
+    t = fr._terms({"refundableBefore": True, "penalties": [
+        {"type": "Exchange", "applicability": "Before", "changeable": True, "amount": 0}]})
+    assert t == {"changes": "changes allowed, no fee", "refund": "fully refundable before departure"}
+    assert "confirm at booking" in fr._terms({})["changes"]
+
+
+def test_client_quote_is_safe_to_paste():
+    """No commission, no agency numbers, and the party total rather than per ticket."""
+    row = _build()["shortlist"][0]
+    q = row["client_quote"]
+    assert "Delta" in q and "Total for 2 travelers" in q and "ATL" in q
+    for leak in ("commission", "IATA", "33520476"):
+        assert leak.lower() not in q.lower(), leak
+    # The fixture's commission is scrubbed to 0 (public repo), so prove a real
+    # amount stays out with a fare that carries one.
+    quote = fr.client_quote({"legs": [], "fare": {"commission_per_ticket_usd": 1234.56,
+                                                  "price_total_usd": 10}}, 2)
+    assert "1,234" not in quote and "Total for 2 travelers: $10.00" in quote
+    assert f"{row['price_total_usd']:,.2f}" in q
+
+
+def test_commission_total_covers_every_ticket():
+    out = fr.build(POOL, fr.Options(cabins=["Y"], adults=2, children=1))
+    r = out["shortlist"][0]
+    assert r["commission_total_usd"] == round(r["commission_per_ticket_usd"] * 3, 2)
+
+
+def test_airports_summary_only_when_there_is_a_choice():
+    assert _build()["airports"] == []
+    two = [dict(it) for it in POOL[:40]]
+    for it in two[:20]:
+        it["legs"] = [dict(it["legs"][0], origin="XXX")]
+    out = fr.build(two, fr.Options(cabins=["Y"], adults=2, max_layover_minutes=None))
+    assert {a["from"] for a in out["airports"]} >= {"XXX"}
