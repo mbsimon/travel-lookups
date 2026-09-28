@@ -272,6 +272,32 @@ def check(pool: list[dict], flights: list[str], *, cabins: list[str], adults: in
                     pool_age_minutes, max(ages), today)
 
 
+def _google_numbers(direct, routing, adults, children, cabin) -> list[str] | None:
+    """Each Fora flight under the number Google lists it by, or None.
+
+    Searches Google for each flight's own airports and date and takes the one
+    nonstop leaving at the same minute. None when any flight has no single
+    match, so a near miss is never priced as the same itinerary.
+    """
+    from . import google_flights as gf
+    out = []
+    for leg in routing["segments"]:
+        for o, d, when in leg:
+            when = str(when)
+            try:
+                res = direct.search([gf.Leg(when[:10], o, d)], adults=adults,
+                                    children=children, cabin=cabin)
+            except gf.DirectError:
+                return None
+            numbers = {r["flights"][0] for r in res.get("itineraries") or []
+                       if r.get("stops") == 0 and len(r.get("flights") or []) == 1
+                       and (r.get("departs") or {}).get("time") == when[11:16]}
+            if len(numbers) != 1:
+                return None
+            out.append(numbers.pop())
+    return out
+
+
 def check_direct(pool: list[dict], flights: list[str], *, cabins: list[str], adults: int,
                  children: int, direct, pool_age_minutes: float = 0,
                  today: date | None = None, options: "fr.Options | None" = None,
@@ -314,9 +340,22 @@ def check_direct(pool: list[dict], flights: list[str], *, cabins: list[str], adu
         resp = {"best_flights": [gf.as_serpapi_option(r) for r in found["itineraries"]]}
         return _alternatives(resp, routing, pool, options, tickets, one_way=p["type"] == 2)
 
+    got, on_google = None, routing["flights"]
     try:
         got = direct.booking(legs, adults=adults, children=children, cabin=cabin)
     except gf.ItineraryUnavailable:
+        # Codeshares: Fora quotes the marketed number (IB4218) and Google lists
+        # the flight under the airline that flies it (AA100). Find each flight
+        # on Google by its airports and departure minute, then ask again.
+        found = _google_numbers(direct, routing, adults, children, cabin)
+        if found and found != routing["flights"]:
+            try:
+                got = direct.booking(gf.segments_from_flights(found, routing["segments"]),
+                                     adults=adults, children=children, cabin=cabin)
+                on_google = found
+            except gf.ItineraryUnavailable:
+                pass
+    if got is None:
         out = _result("NO_PUBLIC_MATCH", fora=fora,
                       reason=f"Google Flights does not sell {'+'.join(routing['flights'])} "
                              "together on this date (its booking page says the itinerary "
@@ -328,6 +367,7 @@ def check_direct(pool: list[dict], flights: list[str], *, cabins: list[str], adu
     g_ladder = got["fares"]
     age = got.get("_cached_age_minutes", 0)
     public = {"source": gf.SOURCE, "url": got.get("url"), "fetched_at": got.get("fetched_at"),
+              "flights_on_google": on_google,
               "searches_spent": 0, "age_minutes": age, "tickets": tickets,
               "headline_party_total_usd": min(g["party_total_usd"] for g in g_ladder),
               "ladder": g_ladder}

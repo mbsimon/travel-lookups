@@ -110,3 +110,26 @@ def test_united_brands_map_to_tiers_without_a_table_entry():
 def test_parsers_ignore_labels_that_are_not_prices(label):
     assert g.parse_row_label(label) is None
     assert g.parse_fare_label(label) is None
+
+
+# ─── Codeshares: Fora's marketed numbers vs Google's operating numbers ────────
+
+class _FakeDirect:
+    """Google lists AA100 at 18:25 and a later AA flight; nothing else."""
+    def search(self, legs, **k):
+        return {"itineraries": [
+            {"stops": 0, "flights": ["AA100"], "departs": {"time": "18:25"}},
+            {"stops": 0, "flights": ["AA106"], "departs": {"time": "20:10"}},
+            {"stops": 1, "flights": ["AA1", "AA2"], "departs": {"time": "18:25"}}]}
+
+
+def test_codeshare_is_found_by_airports_and_departure_minute():
+    from travel_lookups import flight_qa
+    routing = {"segments": [[("JFK", "LHR", "2026-11-10 18:25")]]}
+    assert flight_qa._google_numbers(_FakeDirect(), routing, 1, 0, 1) == ["AA100"]
+
+
+def test_no_single_match_means_no_substitution():
+    from travel_lookups import flight_qa
+    routing = {"segments": [[("JFK", "LHR", "2026-11-10 07:00")]]}
+    assert flight_qa._google_numbers(_FakeDirect(), routing, 1, 0, 1) is None
