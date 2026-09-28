@@ -12,7 +12,8 @@ fora_flights.search("MAD", "JFK", date(2026, 10, 15), date(2026, 10, 22))  # liv
 
 | Module | Source | Cost |
 |---|---|---|
-| `flights` | AeroAPI schedules; SerpApi fares | ~$0.002/query; fares 250/month with a 50 reserve held in code |
+| `flights` | AeroAPI schedules; Google Flights fares (direct first, SerpApi fallback) | ~$0.002/query; direct fares free; SerpApi 250/month with a 50 reserve held in code |
+| `google_flights` | Google Flights' own pages via headless Chromium (`[browser]` extra) | free; ~3-7 s a page |
 | `trains` | Transitous (open GTFS) | free, no key |
 | `fora_flights` | flights.fora.travel (air1t), Michael's advisor login | free, but a real live GDS/NDC query each call — don't poll |
 
@@ -36,6 +37,28 @@ and again client-side (`baggage == 0` on the fare), since the upstream flag
 isn't trusted alone. Every result also carries `basic_economy`,
 `checked_bags` and `fare_brands` so the fare class is visible, not just
 filtered — pass `omit_basic_economy=False` to see it when asked for.
+
+## Google Flights, read directly
+
+`google_flights` builds Google's `tfs` search URL (a base64url protobuf) and
+reads the page with Playwright: result rows from their aria-labels and
+segment links, and, for flights named by number, every fare brand on the
+booking page with its terms. It is the primary fare source for
+`flights.itineraries()` and the flight QA (`public_fares.qa_check`); SerpApi is
+the fallback when a page times out, comes back empty, fails to parse or is
+blocked. Results say which source answered (`source`).
+
+Install the extra where fares are fetched: `pip install
+'travel-lookups[browser]'` then `playwright install chromium`. Without it,
+imports still work and every fare read falls back to SerpApi, which is what
+agency-hq and fora-apps get. `GOOGLE_FLIGHTS_DIRECT=0` turns it off;
+`GOOGLE_FLIGHTS_CHANNEL=chrome` uses the installed Chrome on a Mac.
+
+Every Google figure is the PARTY total; every field says `party_total_usd`
+or `per_person_usd`, with `tickets`. Brands map to the tiers flight_qa
+compares (basic, standard, flexible) from Google's own terms, then a brand
+table, then Jev (vendored `jev_client.py`, 0.8 confidence or it stays
+unknown; every Jev mapping is logged to `jev_fare_tiers.jsonl`).
 
 ## Why it exists separately
 

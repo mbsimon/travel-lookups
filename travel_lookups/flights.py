@@ -2,13 +2,14 @@
 
 Two sources, because they answer different questions:
 
-  AeroAPI  — what physically flies a city pair: operating carrier, local times,
-             aircraft, seat count by cabin. First-party schedule data.
-  SerpApi  — connecting itineraries and fares, read off Google Flights.
+  AeroAPI        — what physically flies a city pair: operating carrier, local
+                   times, aircraft, seat count by cabin. First-party schedules.
+  Google Flights — connecting itineraries and fares. Read from Google's own
+                   pages first (`google_flights`, free); SerpApi, on a
+                   250-search month, only when a page cannot be read.
 
 AeroAPI is the default. It costs a fraction of a cent against a monthly credit,
-while SerpApi runs on a 250-search month — so a question about nonstops must
-never spend a SerpApi search.
+so a question about nonstops must never touch a fare source.
 
 This module is also the implementation behind the `travel` MCP server
 (`mbsimon/travel-mcp`, served at travel.michaelbsimon.com/mcp), which imports it
@@ -414,17 +415,127 @@ def _serpapi_spend() -> None:
         pass  # never let bookkeeping break a lookup
 
 
+# Rows whose fare-brand ladder is read from Google's booking page, in
+# parallel, on a direct search. Each costs a page load (~3-6 s), no money.
+BRAND_ROWS_DEFAULT = 5
+NOT_CHECKED_SERPAPI = ("read through SerpApi (Google Flights page unreadable): this is Google's "
+                       "headline fare and its brand is not named; a brand check costs one "
+                       "booking-options search per row")
+
+
+def _not_checked(reason: str) -> dict:
+    return {"verdict": "NOT_CHECKED", "not_checked": reason}
+
+
+def _direct_itineraries(origin, destination, outbound_date, return_date, adults, cabin,
+                        max_stops, children, brand_rows) -> dict:
+    """The same answer read from Google Flights' own pages. Raises DirectError."""
+    from concurrent.futures import ThreadPoolExecutor
+    from . import google_flights as gf
+    o, d = origin.strip().upper(), destination.strip().upper()
+    legs = [gf.Leg(outbound_date, o, d)] + ([gf.Leg(return_date, d, o)] if return_date else [])
+    found = gf.search(legs, adults=adults, children=children,
+                      cabin=CABIN_CODES.get(cabin.lower(), 1))
+    limit = STOP_CODES.get(max_stops.lower(), 0)
+    rows = [r for r in found["itineraries"] if not limit or r["stops"] <= limit - 1]
+    one_way = not return_date
+
+    def brands(row):
+        segs = tuple(gf.Segment(x["from"], x["date"], x["to"], x["carrier"], x["number"])
+                     for x in row["segments"])
+        leg = gf.Leg(outbound_date, o, d, segs)
+        try:
+            got = gf.booking([leg], adults=adults, children=children,
+                             cabin=CABIN_CODES.get(cabin.lower(), 1))
+        except gf.DirectError as exc:
+            return _not_checked(f"Google's booking page for these flights could not be read "
+                                f"({exc.kind})")
+        fares = got["fares"]
+        headline = next((f for f in fares if f["airline_direct"] and f["option_title"]
+                         and f["party_total_usd"] == row["party_total_usd"]), None)
+        std = [f for f in fares if f["family"] in ("standard", "flexible")]
+        cheapest_std = min(std, key=lambda f: f["per_person_usd"]) if std else None
+        return {"verdict": "BRANDS_READ", "source": gf.SOURCE, "checked_at": got["fetched_at"],
+                "headline_brand": headline["option_title"] if headline else None,
+                "headline_tier": headline["family"] if headline else None,
+                "cheapest_non_basic": ({"brand": cheapest_std["option_title"],
+                                        "seller": cheapest_std["seller"],
+                                        "per_person_usd": cheapest_std["per_person_usd"],
+                                        "party_total_usd": cheapest_std["party_total_usd"]}
+                                       if cheapest_std else None),
+                "fares": [{"seller": f["seller"], "brand": f["option_title"],
+                           "tier": f["family"], "per_person_usd": f["per_person_usd"],
+                           "party_total_usd": f["party_total_usd"]} for f in fares]}
+
+    checked = rows[:max(0, brand_rows)] if one_way else []
+    if checked:
+        with ThreadPoolExecutor(max_workers=max(1, gf.MAX_PAGES)) as ex:
+            for row, rec in zip(checked, ex.map(brands, checked)):
+                row["google_check"] = rec
+    for row in rows:
+        if "google_check" in row:
+            continue
+        if not one_way:
+            row["google_check"] = _not_checked(
+                "round trip: this is Google's round-trip total for the cheapest return it "
+                "chose; a fare brand exists only once both flights are chosen")
+        else:
+            row["google_check"] = _not_checked(
+                f"brand ladder read for the first {brand_rows} rows only; raise brand_rows "
+                "to read more")
+        row["google_check"].update(source=gf.SOURCE, checked_at=found["fetched_at"])
+    for row in rows:
+        row.pop("segments", None)
+        row.pop("departs", None)
+        row.pop("arrives", None)
+    return {"configured": True, "source": gf.SOURCE, "origin": o, "destination": d,
+            "outbound_date": outbound_date, "return_date": return_date, "currency": "USD",
+            "tickets": adults + children, "fetched_at": found["fetched_at"],
+            "google_url": found["url"], "itineraries": rows, "count": len(rows),
+            "units": "party_total_usd is the whole party; per_person_usd divides it by tickets"}
+
+
 def itineraries(origin: str, destination: str, outbound_date: str,
                 return_date: str | None = None, adults: int = 1,
                 cabin: str = "economy", max_stops: str = "any",
                 override_budget: bool = False, currency: str | None = None,
-                children: int = 0) -> dict:
-    """Bookable routings including connections, with fares. Spends a SerpApi search.
+                children: int = 0, brand_rows: int = BRAND_ROWS_DEFAULT) -> dict:
+    """Bookable routings including connections, with fares, from Google Flights.
 
-    Each itinerary carries `party_total_usd` (what SerpApi calls `price`: the
-    whole party), `per_person_usd` and `tickets`. `currency` forces a currency;
-    a comparison with Fora must pass "USD" because Fora prices in dollars.
+    Google's own page first (free, always USD); SerpApi, which spends a search,
+    only when the page cannot be read or a non-USD `currency` is forced. The
+    answer says which in `source`, and `direct_error` says why after a fallback.
+
+    Each itinerary carries `party_total_usd` (the whole party), `per_person_usd`
+    and `tickets`, and `google_check`: on a direct one-way search the first
+    `brand_rows` rows get every fare brand Google sells on those flights
+    (headline_brand names what the headline price buys; it is often basic),
+    and every other row says why it was not checked.
     """
+    direct_error = None
+    if currency is None or currency.upper() == "USD":
+        try:
+            return _direct_itineraries(origin, destination, outbound_date, return_date,
+                                       adults, cabin, max_stops, children, brand_rows)
+        except Exception as exc:        # DirectError, or anything a page change throws
+            direct_error = str(exc)
+    else:
+        direct_error = f"currency {currency} forced; the direct read prices in USD"
+    out = _serpapi_itineraries(origin, destination, outbound_date, return_date, adults,
+                               cabin, max_stops, override_budget, currency, children)
+    out["source"] = "serpapi"
+    out["direct_error"] = direct_error
+    for row in out.get("itineraries") or []:
+        row["google_check"] = _not_checked(NOT_CHECKED_SERPAPI)
+    return out
+
+
+def _serpapi_itineraries(origin: str, destination: str, outbound_date: str,
+                         return_date: str | None = None, adults: int = 1,
+                         cabin: str = "economy", max_stops: str = "any",
+                         override_budget: bool = False, currency: str | None = None,
+                         children: int = 0) -> dict:
+    """The SerpApi path, unchanged: spends one search against the budget."""
     budget = serpapi_budget()
     if budget["spendable"] <= 0 and not override_budget:
         return {"configured": True, "budget": budget, "error": (

@@ -2,7 +2,9 @@
 
 Two modules, one rule each:
 
-    flights — AeroAPI published schedules; SerpApi fares behind a budget
+    flights — AeroAPI published schedules; Google Flights fares, read from
+              Google's own pages first (google_flights) and SerpApi, behind a
+              budget, only when a page cannot be read
     trains  — Transitous open GTFS schedules; no fares at all
 
 Neither books, holds, or reserves anything. Both convert times into the local

@@ -179,36 +179,50 @@ def plan(routing: dict, cabins: list[str], adults: int, children: int) -> dict:
 
 # ─── The check ───────────────────────────────────────────────────────────────
 
-def check(pool: list[dict], flights: list[str], *, cabins: list[str], adults: int,
-          children: int, fetch, pool_age_minutes: float = 0, carriers_for_retry=None,
-          today: date | None = None, options: "fr.Options | None" = None) -> dict:
-    """Compare one Fora routing with Google Flights. See the module docstring."""
-    today = today or datetime.now(timezone.utc).date()
+def _prepare(pool, flights, cabins, adults, children, pool_age_minutes, today):
+    """The Fora side of a check: (routing, quoted fare, fora summary, early result)."""
     tickets = adults + children
     routing = fora_routing(pool, flights, cabins)
     if routing is None:
-        return _result("NO_DATA", reason=f"{'+'.join(flights)} is not in this Fora search")
+        return None, None, None, _result("NO_DATA",
+                                         reason=f"{'+'.join(flights)} is not in this Fora search")
     q = routing["quoted"]
     fora = {"key": routing["key"], "flights": routing["flights"],
             "also_sold_as": routing["also_sold_as"], "tickets": tickets,
             "quoted_fare": q, "ladder": routing["ladder"],
             "pool_age_minutes": round(pool_age_minutes)}
     if q is None:
-        return _result("NO_DATA", fora=fora,
-                       reason="no non-basic Fora fare in the requested cabin on these flights")
+        return routing, q, fora, _result(
+            "NO_DATA", fora=fora,
+            reason="no non-basic Fora fare in the requested cabin on these flights")
     if q.get("last_ticket_date") and q["last_ticket_date"] < today.isoformat():
-        return _result("NO_DATA", fora=fora,
-                       reason=f"the Fora fare had to be ticketed by {q['last_ticket_date']}; "
-                              "search again")
+        return routing, q, fora, _result(
+            "NO_DATA", fora=fora, reason=f"the Fora fare had to be ticketed by "
+                                         f"{q['last_ticket_date']}; search again")
+    return routing, q, fora, None
+
+
+def check(pool: list[dict], flights: list[str], *, cabins: list[str], adults: int,
+          children: int, fetch, pool_age_minutes: float = 0, carriers_for_retry=None,
+          today: date | None = None, options: "fr.Options | None" = None) -> dict:
+    """Compare one Fora routing with Google Flights through SerpApi (the
+    fallback source). See the module docstring."""
+    today = today or datetime.now(timezone.utc).date()
+    tickets = adults + children
+    routing, q, fora, early = _prepare(pool, flights, cabins, adults, children,
+                                       pool_age_minutes, today)
+    if early:
+        return _stamp(early, SOURCE_SERPAPI)
     p = plan(routing, cabins, adults, children)
     if p.get("error"):
-        return _result("NO_DATA", fora=fora, reason=p["error"])
+        return _stamp(_result("NO_DATA", fora=fora, reason=p["error"]), SOURCE_SERPAPI)
 
     # Walk Google's legs: each step lists one leg's options; only the last
     # carries a booking_token, and only that price describes the trip.
     resp = fetch(p["first"])
     if resp.get("error"):
-        return _result("NO_DATA", fora=fora, reason=f"Google Flights: {resp['error']}")
+        return _stamp(_result("NO_DATA", fora=fora, reason=f"Google Flights: {resp['error']}"),
+                      SOURCE_SERPAPI)
     first_list = resp
     ages = [resp.get("_cached_age_minutes", 0)]
     chosen = []
@@ -224,48 +238,126 @@ def check(pool: list[dict], flights: list[str], *, cabins: list[str], adults: in
                                  f"({'+'.join(routing['flights'])}) on this search")
             out["public_alternatives"] = _alternatives(first_list, routing, pool, options,
                                                        tickets, one_way=p["type"] == 2)
-            return out
+            return _stamp(out, SOURCE_SERPAPI)
         chosen.append(opt)
         if k < len(routing["segments"]) - 1:
             tok = opt.get("departure_token")
             if not tok:
-                return _result("NO_DATA", fora=fora, reason="Google gave no token for the next leg")
+                return _stamp(_result("NO_DATA", fora=fora,
+                                      reason="Google gave no token for the next leg"),
+                              SOURCE_SERPAPI)
             resp = fetch({**p["first"], "departure_token": tok})
             ages.append(resp.get("_cached_age_minutes", 0))
             if resp.get("error"):
-                return _result("NO_DATA", fora=fora, reason=f"Google Flights: {resp['error']}")
+                return _stamp(_result("NO_DATA", fora=fora,
+                                      reason=f"Google Flights: {resp['error']}"), SOURCE_SERPAPI)
     last = chosen[-1]
     if not last.get("booking_token"):
-        return _result("NO_DATA", fora=fora, reason="Google's last leg carried no booking token")
+        return _stamp(_result("NO_DATA", fora=fora,
+                              reason="Google's last leg carried no booking token"), SOURCE_SERPAPI)
     booking = fetch({**p["first"], "booking_token": last["booking_token"]})
     ages.append(booking.get("_cached_age_minutes", 0))
     params = booking.get("search_parameters") or {}
     if params.get("adults") not in (None, adults) or params.get("currency") not in (None, "USD"):
-        return _result("NO_DATA", fora=fora,
-                       reason="Google answered for a different party or currency")
+        return _stamp(_result("NO_DATA", fora=fora,
+                              reason="Google answered for a different party or currency"),
+                      SOURCE_SERPAPI)
     g_ladder = _g_ladder(booking, tickets)
-    public = {"source": "google_flights", "searches_spent": getattr(fetch, "spent", None),
+    public = {"source": SOURCE_SERPAPI, "searches_spent": getattr(fetch, "spent", None),
               "age_minutes": max(ages), "tickets": tickets,
               "headline_party_total_usd": last.get("price"),
               "ladder": g_ladder}
+    alts = _alternatives(first_list, routing, pool, options, tickets, one_way=p["type"] == 2)
+    return _compare(routing, q, fora, public, g_ladder, tickets, alts,
+                    pool_age_minutes, max(ages), today)
 
-    # The comparison: same brand first, then same family by terms, never basic.
-    want = _norm_brand(q["brands"][0]) if len(q["brands"]) == 1 else None
-    exact = [g for g in g_ladder if want and _norm_brand(g["option_title"]) == want]
+
+def check_direct(pool: list[dict], flights: list[str], *, cabins: list[str], adults: int,
+                 children: int, direct, pool_age_minutes: float = 0,
+                 today: date | None = None, options: "fr.Options | None" = None,
+                 alternatives: bool = True) -> dict:
+    """The same check read straight from Google Flights' own pages (primary).
+
+    `direct` has `booking(legs, adults, children, cabin)` and
+    `search(legs, adults, children, cabin)`, each returning the dicts
+    `google_flights.booking()` / `.search()` return, plus
+    `_cached_age_minutes`. They raise `google_flights.DirectError` when the
+    page cannot be read; that propagates, so the caller can fall back to
+    SerpApi. Google saying the flights are not sold together is an answer
+    (NO_PUBLIC_MATCH), never a fallback.
+
+    Costs no SerpApi search. The flights come from the Fora routing itself, so
+    the booking page is asked for exactly those flights and lists every fare
+    brand Google sells on them.
+    """
+    from . import google_flights as gf
+    today = today or datetime.now(timezone.utc).date()
+    tickets = adults + children
+    routing, q, fora, early = _prepare(pool, flights, cabins, adults, children,
+                                       pool_age_minutes, today)
+    if early:
+        return _stamp(early, gf.SOURCE)
+    p = plan(routing, cabins, adults, children)
+    if p.get("error"):
+        return _stamp(_result("NO_DATA", fora=fora, reason=p["error"]), gf.SOURCE)
+    cabin = p["first"]["travel_class"]
+    legs = gf.segments_from_flights(routing["flights"], routing["segments"])
+    search_legs = [gf.Leg(l.date, l.origin, l.destination) for l in legs]
+
+    def alts_now():
+        if not alternatives:
+            return None
+        try:
+            found = direct.search(search_legs, adults=adults, children=children, cabin=cabin)
+        except gf.DirectError:
+            return []
+        resp = {"best_flights": [gf.as_serpapi_option(r) for r in found["itineraries"]]}
+        return _alternatives(resp, routing, pool, options, tickets, one_way=p["type"] == 2)
+
+    try:
+        got = direct.booking(legs, adults=adults, children=children, cabin=cabin)
+    except gf.ItineraryUnavailable:
+        out = _result("NO_PUBLIC_MATCH", fora=fora,
+                      reason=f"Google Flights does not sell {'+'.join(routing['flights'])} "
+                             "together on this date (its booking page says the itinerary "
+                             "is not available)")
+        a = alts_now()
+        if a is not None:
+            out["public_alternatives"] = a
+        return _stamp(out, gf.SOURCE)
+    g_ladder = got["fares"]
+    age = got.get("_cached_age_minutes", 0)
+    public = {"source": gf.SOURCE, "url": got.get("url"), "fetched_at": got.get("fetched_at"),
+              "searches_spent": 0, "age_minutes": age, "tickets": tickets,
+              "headline_party_total_usd": min(g["party_total_usd"] for g in g_ladder),
+              "ladder": g_ladder}
+    return _compare(routing, q, fora, public, g_ladder, tickets, alts_now(),
+                    pool_age_minutes, age, today)
+
+
+def _compare(routing, q, fora, public, g_ladder, tickets, alts, pool_age_minutes,
+             public_age, today) -> dict:
+    """The comparison: same brand first, then same family by terms, never basic."""
+    exact = [g for g in g_ladder if len(q["brands"]) == 1
+             and same_brand(q["brands"][0], g.get("option_title"), g.get("seller"))]
     by_terms = [g for g in g_ladder if g["family"] == q["family"]]
+    _annotate_ladder(fora, g_ladder, public)
     if exact:
         comp, how = min(exact, key=lambda g: g["per_person_usd"]), "same fare brand"
     elif by_terms:
         comp, how = min(by_terms, key=lambda g: g["per_person_usd"]), "same fare terms"
     else:
-        only_basic = g_ladder and all(g["family"] == "basic" for g in g_ladder)
+        known = [g for g in g_ladder if g["family"] != "unknown"]
+        only_basic = bool(known) and all(g["family"] == "basic" for g in known)
         out = _result("NO_COMPARABLE_PUBLIC_FARE" if only_basic else "TERMS_UNKNOWN",
                       fora=fora, public=public,
                       reason=("Google shows only a basic fare on these flights, which is "
                               "never compared" if only_basic else
                               "Google did not name the fare, so no like-for-like price"))
         out["fare_comparison"] = _ladder_rows(routing["ladder"], g_ladder)
-        return out
+        if alts is not None:
+            out["public_alternatives"] = alts
+        return _stamp(out, public["source"])
     public["compared_fare"] = comp
     public["matched_by"] = how
     delta = round(q["per_person_usd"] - comp["per_person_usd"], 2)
@@ -282,16 +374,26 @@ def check(pool: list[dict], flights: list[str], *, cabins: list[str], adults: in
     out["confidence"] = "high" if how == "same fare brand" else "medium"
     out["risk"] = {"above_retail": verdict == "FORA_ABOVE_RETAIL"}
     out["fare_comparison"] = _ladder_rows(routing["ladder"], g_ladder)
-    out["public_alternatives"] = _alternatives(first_list, routing, pool, options, tickets,
-                                               one_way=p["type"] == 2)
+    if alts is not None:
+        out["public_alternatives"] = alts
     out["manager_line"] = _manager_line(out, q, comp, how, tickets)
-    out["client_line"] = _client_line(out, q, tickets, pool_age_minutes, max(ages), today)
-    return out
+    out["client_line"] = _client_line(out, q, tickets, pool_age_minutes, public_age, today)
+    return _stamp(out, public["source"])
 
 
 def _result(verdict: str, **kw) -> dict:
     return {"verdict": verdict, "checked_at": datetime.now(timezone.utc).isoformat(
         timespec="seconds"), **kw, "client_line": kw.get("client_line", "")}
+
+
+def same_brand(fora_brand, g_title, g_seller=None) -> bool:
+    """"DELTA MAIN CLASSIC" is Google's "Delta Main Classic", and Virgin's
+    "Economy Classic" matches a Fora "VIRGIN ATLANTIC ECONOMY CLASSIC": the
+    seller's name may lead either side."""
+    a, b, s = _norm_brand(fora_brand), _norm_brand(g_title), _norm_brand(g_seller)
+    if not a or not b:
+        return False
+    return a == b or (bool(s) and (a == s + b or s + a == b))
 
 
 def _ladder_rows(fora_ladder: list[dict], g_ladder: list[dict]) -> list[dict]:
@@ -300,13 +402,120 @@ def _ladder_rows(fora_ladder: list[dict], g_ladder: list[dict]) -> list[dict]:
     for f in fora_ladder:
         if len(f["brands"]) != 1 or f["family"] == "basic":
             continue
-        g = [x for x in g_ladder if _norm_brand(x["option_title"]) == _norm_brand(f["brands"][0])]
+        g = [x for x in g_ladder if same_brand(f["brands"][0], x["option_title"], x.get("seller"))]
         if g:
             gp = min(x["per_person_usd"] for x in g)
             rows.append({"brand": f["brands"][0], "fora_per_person_usd": f["per_person_usd"],
                          "public_per_person_usd": gp,
                          "delta_per_person_usd": round(f["per_person_usd"] - gp, 2)})
     return rows
+
+
+# ─── Every figure carries its check ──────────────────────────────────────────
+# Michael, 2026-09-28: no flight figure is cited without a check against the
+# published Google Flights fare for the same itinerary and brand. Every priced
+# row a tool returns carries `google_check` (the Google figure, its brand, the
+# source and when it was read) or `google_check.not_checked` with the reason.
+
+SOURCE_SERPAPI = "serpapi"
+PRICE_KEYS = frozenset({"price_per_person_usd", "price_total_usd", "per_person_usd",
+                        "party_total_usd", "cheapest_per_person_usd", "total_per_person_usd",
+                        "lowest_public_per_person_usd", "best_effective_per_person_usd"})
+CHECK_KEYS = ("google_check", "retail")
+# Subtrees that ARE the comparison (Google's own ladder, the delta) or its
+# inputs, so they are not rows that need a check of their own.
+_CHECK_SUBTREES = frozenset({"google_check", "retail", "public", "delta", "fare_comparison",
+                             "compared_fare", "retail_summary"})
+
+
+def not_checked(reason: str) -> dict:
+    return {"verdict": "NOT_CHECKED", "not_checked": reason}
+
+
+def check_record(res: dict) -> dict:
+    """The compact Google comparison a priced row carries, from a check result."""
+    pub = res.get("public") or {}
+    comp = pub.get("compared_fare") or {}
+    d = res.get("delta") or {}
+    rec = {"verdict": res.get("verdict"), "source": res.get("source") or pub.get("source"),
+           "checked_at": pub.get("fetched_at") or res.get("checked_at"),
+           "public_fare": comp.get("option_title") or (comp.get("family") if comp else None),
+           "public_per_person_usd": comp.get("per_person_usd"),
+           "public_party_total_usd": comp.get("party_total_usd"),
+           "delta_per_person_usd": d.get("per_person_usd"),
+           "delta_party_total_usd": d.get("party_total_usd"),
+           "confidence": res.get("confidence")}
+    if not comp:
+        rec["not_checked"] = res.get("reason") or f"no like-for-like public fare ({res.get('verdict')})"
+    return {k: v for k, v in rec.items() if v is not None}
+
+
+def _stamp(out: dict, source: str) -> dict:
+    """Name the source, and give every priced row inside the result its check."""
+    out["source"] = source
+    pub = out.get("public") or {}
+    fora = out.get("fora") or {}
+    if fora.get("ladder") and not all("google_check" in r for r in fora["ladder"]):
+        _annotate_ladder(fora, pub.get("ladder") or [], pub)
+    q = fora.get("quoted_fare")
+    if q is not None:                 # the quoted rung carries the verdict itself
+        q["google_check"] = check_record(out)
+    for alt in out.get("public_alternatives") or []:
+        if "lowest_public_per_person_usd" in alt:
+            alt["google_check"] = not_checked(
+                "Google's headline price for other flights, often basic; its fare brand "
+                "was not read, so it is shown for context and never compared")
+    return out
+
+
+def _annotate_ladder(fora: dict, g_ladder: list[dict], public: dict) -> None:
+    """Each Fora fare brand next to the same brand on Google, or why not."""
+    for f in fora.get("ladder") or []:
+        if not g_ladder:
+            f["google_check"] = not_checked("Google's fares for these flights were not read")
+            continue
+        if f["family"] == "basic":
+            f["google_check"] = not_checked("basic fare; never quoted or compared")
+            continue
+        g = [x for x in g_ladder if len(f["brands"]) == 1
+             and same_brand(f["brands"][0], x.get("option_title"), x.get("seller"))]
+        if not g:
+            f["google_check"] = not_checked(
+                f"Google lists no fare named {' / '.join(f['brands']) or 'this'} on these "
+                "flights")
+            continue
+        best = min(g, key=lambda x: x["per_person_usd"])
+        f["google_check"] = {"verdict": "SAME_BRAND", "source": public.get("source"),
+                             "checked_at": public.get("fetched_at"),
+                             "public_fare": best["option_title"],
+                             "public_per_person_usd": best["per_person_usd"],
+                             "public_party_total_usd": best["party_total_usd"],
+                             "delta_per_person_usd": round(f["per_person_usd"]
+                                                           - best["per_person_usd"], 2)}
+
+
+def unchecked_prices(obj, path: str = "") -> list[str]:
+    """Paths of priced rows that carry neither a Google check nor a reason.
+
+    A priced row is any dict with a key in PRICE_KEYS. Its check lives in
+    `google_check` (or `retail`, the name fora_flight_search rows use) and
+    must either name the Google figure's source and time or say `not_checked`.
+    """
+    bad = []
+    if isinstance(obj, dict):
+        if PRICE_KEYS & obj.keys():
+            rec = next((obj[k] for k in CHECK_KEYS if isinstance(obj.get(k), dict)), None)
+            ok = rec is not None and (bool(rec.get("not_checked")) or
+                                      (rec.get("source") and rec.get("checked_at")))
+            if not ok:
+                bad.append(path or "<root>")
+        for k, v in obj.items():
+            if k not in _CHECK_SUBTREES:
+                bad += unchecked_prices(v, f"{path}.{k}" if path else k)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            bad += unchecked_prices(v, f"{path}[{i}]")
+    return bad
 
 
 def _money(x: float) -> str:
