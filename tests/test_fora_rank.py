@@ -277,6 +277,16 @@ def test_client_quote_is_safe_to_paste():
     assert f"{row['price_total_usd']:,.2f}" in q
 
 
+def test_client_quote_ends_with_the_flight_disclaimer():
+    """Every flight price quoted to a client says fares are dynamic (2026-09-28)."""
+    from travel_lookups import FLIGHT_DISCLAIMER, jev_client
+    assert FLIGHT_DISCLAIMER == jev_client.FLIGHT_DISCLAIMER
+    q = _build()["shortlist"][0]["client_quote"]
+    assert q.endswith(FLIGHT_DISCLAIMER) and q.count(FLIGHT_DISCLAIMER) == 1
+    assert "Fares change until ticketed" not in q
+    assert not jev_client.flight_price_check(q, use_jev=False).warn
+
+
 def test_commission_total_covers_every_ticket():
     out = fr.build(POOL, fr.Options(cabins=["Y"], adults=2, children=1))
     r = out["shortlist"][0]

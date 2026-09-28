@@ -36,6 +36,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from . import FLIGHT_DISCLAIMER
 from .fora_flights import (CABIN_ALLOWED, FlightSearchError, flight_numbers,
                            has_flights, leg_cabin_ok, normalize_flight,
                            _is_basic_economy)
@@ -459,7 +460,7 @@ def client_quote(r: dict, travelers: int) -> str:
     lines.append(f"Fare: {brands}. " + "; ".join(t for t in terms if t) + ".")
     if total is not None:
         lines.append(f"Total for {travelers} traveler{'s' if travelers != 1 else ''}: "
-                     f"${total:,.2f}, taxes included. Fares change until ticketed.")
+                     f"${total:,.2f}, taxes included. {FLIGHT_DISCLAIMER}")
     return "\n".join(lines)
 
 

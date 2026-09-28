@@ -11,7 +11,15 @@ Neither books, holds, or reserves anything. Both convert times into the local
 zone of each airport or station, because the raw values are UTC and putting one
 on a client's page unconverted is a two-hour error nobody catches.
 """
-from . import flights, trains  # noqa: F401
+# Michael, 2026-09-28: every flight price quoted to a client says this. The
+# fare is checked once against Google Flights at quote time and never
+# re-checked, so the note is what covers a price that moves afterward. Equal
+# to jev_client.FLIGHT_DISCLAIMER (a test holds them together); defined here
+# so a consumer that renders a quote does not need the Jev client.
+FLIGHT_DISCLAIMER = ("Flight availability and prices are dynamic and can change "
+                     "until tickets are issued.")
 
-__all__ = ["flights", "trains"]
+from . import flights, trains  # noqa: E402,F401
+
+__all__ = ["FLIGHT_DISCLAIMER", "flights", "trains"]
 __version__ = "0.1.0"

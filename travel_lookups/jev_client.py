@@ -186,3 +186,66 @@ def commission_leak(text: str) -> LeakVerdict:
     a = ask(text, LEAK_QUESTIONS)
     p = float(a["leak"]["noul"])
     return LeakVerdict(p=p, kind=a["kind"]["choice"], warn=p >= LEAK_WARN_P)
+
+
+# ---------------------------------------------------------------------------
+# Flight prices in client-facing text
+# ---------------------------------------------------------------------------
+
+# Michael, 2026-09-28: every quoted flight price says that flight inventory
+# and pricing are dynamic. Checked once at quote time against Google Flights,
+# never re-checked afterward.
+FLIGHT_DISCLAIMER = ("Flight availability and prices are dynamic and can change "
+                     "until tickets are issued.")
+
+_MONEY = re.compile(r"(?:[$€£]\s?\d[\d,]*(?:\.\d{2})?|\b\d[\d,]*(?:\.\d{2})?\s?(?:USD|EUR|dollars|euros)\b)",
+                    re.IGNORECASE)
+_FLIGHT_WORDS = re.compile(r"\b(flights?|fares?|airfare|nonstop|non-stop|layover|connection|"
+                           r"economy|business class|premium economy|first class|round[- ]trip|"
+                           r"one[- ]way|depart\w*|airline|ticket\w*)\b", re.IGNORECASE)
+_DYNAMIC = re.compile(r"\b(dynamic|can change|subject to change|until (?:tickets? (?:are|is) )?"
+                      r"(?:issued|ticketed)|not (?:held|guaranteed))\b", re.IGNORECASE)
+
+FLIGHT_PRICE_QUESTIONS = {
+    "flight_price": {
+        "type": "noul",
+        "instructions": ("Does this text quote a price for airline flights or airfare "
+                         "(not hotels, tours, transfers or trains)?"),
+        "criteria": {"true": "States what flights or airfare cost",
+                     "false": "No flight price, or only hotel, tour, transfer or train prices"},
+    },
+}
+
+
+@dataclass
+class FlightPriceVerdict:
+    quotes_flight_price: bool
+    has_disclaimer: bool
+    p: float | None          # Jev's probability, None when only the patterns decided
+
+    @property
+    def warn(self) -> bool:
+        return self.quotes_flight_price and not self.has_disclaimer
+
+    def message(self) -> str:
+        return ("Quotes a flight price without saying that flight availability and prices "
+                f"are dynamic. Add: \"{FLIGHT_DISCLAIMER}\"")
+
+
+def flight_price_check(text: str, use_jev: bool = True) -> FlightPriceVerdict:
+    """Does client-facing text quote a flight price, and does it carry the note?
+
+    Patterns decide the clear cases (no money, or no flight words, means no);
+    Jev decides the rest. With Jev unavailable, money plus flight words counts
+    as a flight price, so a failure warns instead of staying silent.
+    """
+    has_note = bool(_DYNAMIC.search(text or ""))
+    if not _MONEY.search(text or "") or not _FLIGHT_WORDS.search(text or ""):
+        return FlightPriceVerdict(False, has_note, None)
+    if not use_jev:
+        return FlightPriceVerdict(True, has_note, None)
+    try:
+        p = float(ask(text, FLIGHT_PRICE_QUESTIONS)["flight_price"]["noul"])
+    except JevError:
+        return FlightPriceVerdict(True, has_note, None)
+    return FlightPriceVerdict(p >= 0.5, has_note, p)
