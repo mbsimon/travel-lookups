@@ -4,12 +4,11 @@ The same split as flights.py, for the same reason:
 
   Transitous — what actually runs between two stations: operator, train number,
                local times, duration, changes. Free, no key, open GTFS.
-There is deliberately no fare source. One existed — per-operator Apify actors
-behind a $5/month ceiling — and it was deleted on 2026-08-17: the budget was
-exhausted, coverage was per-operator and patchy, and Spain, the home market,
-had none at all. A tool whose usual answer is "budget spent, and Renfe is not
-covered anyway" teaches everyone to distrust the whole surface. Sketching an
-itinerary needs times and changes; a price is confirmed at booking regardless.
+Fares live in rail_fares/, which reads each operator's own booking API
+(added 2026-09-28); this module stays schedules-only. An earlier fare source,
+per-operator Apify actors behind a $5/month ceiling, was deleted on
+2026-08-17: the budget was exhausted, coverage was per-operator and patchy,
+and Spain, the home market, had none at all.
 
 WHY NOT THE OBVIOUS ONES. Scraping is closed: form-filler/adapters/train.py
 probed thetrainline.com and sncf-connect.com on 2026-07-18 across headless

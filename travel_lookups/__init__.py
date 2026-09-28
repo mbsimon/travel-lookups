@@ -1,15 +1,18 @@
 """Read-only flight and rail lookups.
 
-Two modules, one rule each:
+Three modules, one rule each:
 
     flights — AeroAPI published schedules; Google Flights fares, read from
               Google's own pages first (google_flights) and SerpApi, behind a
               budget, only when a page cannot be read
-    trains  — Transitous open GTFS schedules; no fares at all
+    trains  — Transitous open GTFS schedules; no fares
+    rail_fares — live per-train fares read from each operator directly
+              (Renfe, Iryo, Ouigo, Trenitalia, Italo, Eurostar, DB, SBB, ÖBB)
 
-Neither books, holds, or reserves anything. Both convert times into the local
-zone of each airport or station, because the raw values are UTC and putting one
-on a client's page unconverted is a two-hour error nobody catches.
+None of them books, holds, or reserves anything. flights and trains convert
+times into the local zone of each airport or station, because the raw values
+are UTC and putting one on a client's page unconverted is a two-hour error
+nobody catches. rail_fares reports the local times each operator quotes.
 """
 # Michael, 2026-09-28: every flight price quoted to a client says this. The
 # fare is checked once against Google Flights at quote time and never

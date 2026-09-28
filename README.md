@@ -15,6 +15,7 @@ fora_flights.search("MAD", "JFK", date(2026, 10, 15), date(2026, 10, 22))  # liv
 | `flights` | AeroAPI schedules; Google Flights fares (direct first, SerpApi fallback) | ~$0.002/query; direct fares free; SerpApi 250/month with a 50 reserve held in code |
 | `google_flights` | Google Flights' own pages via headless Chromium (`[browser]` extra) | free; ~3-7 s a page |
 | `trains` | Transitous (open GTFS) | free, no key |
+| `rail_fares` | each operator's own booking API (Renfe, Iryo, Ouigo ES/FR, Trenitalia, Italo, Eurostar, DB, SBB, ÖBB) | free; a live query to each operator per call |
 | `fora_flights` | flights.fora.travel (air1t), Michael's advisor login | free, but a real live GDS/NDC query each call — don't poll |
 
 Nothing here books, holds or reserves. Keys/session files come from the
@@ -59,6 +60,30 @@ or `per_person_usd`, with `tickets`. Brands map to the tiers flight_qa
 compares (basic, standard, flexible) from Google's own terms, then a brand
 table, then Jev (vendored `jev_client.py`, 0.8 confidence or it stays
 unknown; every Jev mapping is logged to `jev_fare_tiers.jsonl`).
+
+## Rail fares, operator by operator
+
+Trainline and SNCF Connect are behind DataDome, so `rail_fares.rail_fares()`
+asks the operators themselves, through the API each one's own site or app
+calls. It places both stations with Transitous to learn their countries,
+picks the operators for that pair, and queries them concurrently:
+
+```python
+from travel_lookups.rail_fares import rail_fares
+rail_fares("Madrid", "Barcelona", "2026-10-15", adults=2)
+```
+
+Every row is one train with its fares; `price` is the party total and
+`per_person` divides it. Each operator gets a status line (ok, no_service,
+blocked, throttled, unavailable, timeout, error), and one failing never sinks
+the others. Prices are live public fares; nothing is held.
+
+Install the `[rail]` extra (`curl_cffi`) where fares are fetched. Iryo, Italo,
+Eurostar, DB and ÖBB reject python-requests by its TLS fingerprint; without
+the extra they report `unavailable` and the rest still answer. Renfe
+throttles after a handful of rapid searches, so it is paced, cached for ten
+minutes, and cools down on its U014 error instead of retrying. French
+domestic TGV fares (SNCF) are not covered; Ouigo France is.
 
 ## Why it exists separately
 

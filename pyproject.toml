@@ -1,6 +1,6 @@
 [project]
 name = "travel-lookups"
-version = "0.12.2"
+version = "0.13.0"
 description = "Read-only flight and rail schedule lookups for itinerary work"
 requires-python = ">=3.11"
 dependencies = ["requests>=2.28.0", "python-dotenv>=1.0.0"]
@@ -11,10 +11,15 @@ dependencies = ["requests>=2.28.0", "python-dotenv>=1.0.0"]
 # browser; without it every direct read falls back to SerpApi. After
 # installing, fetch a browser: `playwright install chromium`.
 browser = ["playwright>=1.45,<2"]
+# Operator-direct rail fares (rail_fares/). Iryo, Italo, Eurostar, DB and OeBB
+# sit behind Cloudflare, Akamai or AWS WAF, which reject python-requests by its
+# TLS fingerprint; curl_cffi presents Chrome's. Without it those operators
+# report "unavailable" and the rest still answer.
+rail = ["curl_cffi>=0.7"]
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["travel_lookups"]
+packages = ["travel_lookups", "travel_lookups.rail_fares"]
