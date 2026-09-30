@@ -1,6 +1,6 @@
-"""Read-only flight and rail lookups.
+"""Read-only flight, rail and weather lookups.
 
-Three modules, one rule each:
+Four modules, one rule each:
 
     flights — AeroAPI published schedules; Google Flights fares, read from
               Google's own pages first (google_flights) and SerpApi, behind a
@@ -8,6 +8,8 @@ Three modules, one rule each:
     trains  — Transitous open GTFS schedules; no fares
     rail_fares — live per-train fares read from each operator directly
               (Renfe, Iryo, Ouigo, Trenitalia, Italo, Eurostar, DB, SBB, ÖBB)
+    weather — forecast, ranges or typical weather, chosen by how far away the
+              dates are; storms and alerts from NHC and NWS
 
 None of them books, holds, or reserves anything. flights and trains convert
 times into the local zone of each airport or station, because the raw values
