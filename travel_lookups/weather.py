@@ -76,6 +76,10 @@ CLIMATE_PAD_DAYS = 7
 WET_DAY_MM = 1.0                     # Weather Spark's 0.04 in
 LEAN_PCT = 70                        # share of 46-day runs needed to call a lean
 HEAT_C = 35.0                        # 95 F
+# Grid cells at or below this elevation are coast or small island. Found live
+# on 2026-09-30: every model put Nassau's lows at 81-82 F while the airport
+# read 75 F, because the cell mixes in warm sea.
+COASTAL_M = 15
 DUST_UGM3 = 100.0
 STORM_WATCH_KM = 1500
 STORM_LEAD_DAYS = 14
@@ -520,6 +524,7 @@ def typical(place: dict, start: str | date, end: str | date, units: str = "F") -
         "hottest_year": hottest, "coolest_year": coolest,
         "wettest_year": wettest, "driest_year": driest,
         "sea_temperature": "not available for typical weather; forecast only, within 7 days",
+        "elevation_m": elev,
         "summary": lines, "caveats": caveats,
     }
 
@@ -706,10 +711,12 @@ def trip(place: str, start: str, end: str | None = None, units: str = "F",
     near = [d for d in days if 0 <= leads[d] <= RANGES_MAX]
     notes: list[str] = []
     fc, ens = {}, {}
+    elevation = None
     if near:
         try:
             raw = _forecast(loc["latitude"], loc["longitude"])
             loc.setdefault("timezone", raw.get("timezone"))
+            elevation = raw.get("elevation")
             dd = raw.get("daily") or {}
             fc = {t: {k: (dd.get(k) or [None] * (i + 1))[i] for k in dd}
                   for i, t in enumerate(dd.get("time", []))}
@@ -787,6 +794,12 @@ def trip(place: str, start: str, end: str | None = None, units: str = "F",
         horizon = "day-by-day forecast"
     else:
         horizon = "forecast, with ranges past day 7"
+
+    if elevation is None and typ is not None:
+        elevation = typ.get("elevation_m")
+    if elevation is not None and elevation <= COASTAL_M:
+        notes.append("Coast or small island: model lows often run 3-5°F warm here "
+                     "because the grid mixes in the sea; highs are more reliable.")
 
     summary = [r["line"] for r in day_rows]
     if typ:

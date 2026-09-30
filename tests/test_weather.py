@@ -188,3 +188,21 @@ def test_rain_words_follow_nws():
     assert w.rain_words(40) == "chance of rain"
     assert w.rain_words(70) == "rain likely"
     assert w.rain_words(90) == "rain expected"
+
+
+def test_coastal_point_carries_the_warm_lows_caveat(fake, monkeypatch):
+    real = w._get
+
+    def low_lying(url, params=None, ttl=0, _retry=True):
+        d = real(url, params, ttl, _retry)
+        if url == w.FORECAST_URL:
+            d = dict(d, elevation=3.0)
+        return d
+    monkeypatch.setattr(w, "_get", low_lying)
+    r = w.trip("Madrid", (TODAY + timedelta(days=1)).isoformat())
+    assert any("small island" in s for s in r["summary"])
+
+
+def test_inland_point_has_no_coastal_caveat(fake):
+    r = w.trip("Madrid", (TODAY + timedelta(days=1)).isoformat())
+    assert not any("small island" in s for s in r["summary"])
