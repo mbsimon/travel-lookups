@@ -666,13 +666,12 @@ def risks(place: dict, start: date, end: date, highs_c: dict[str, float] | None 
             lines.append(f"These dates fall in {name} season "
                          f"({date(2000, *a):%b} {a[1]} to {date(2000, *b):%b} {b[1]}).")
     if lead <= STORM_LEAD_DAYS and end >= today:
-        try:
-            for s in active_storms(lat, lon):
-                lines.append(storm_line(s))
-        except WeatherError as e:
-            lines.append(f"Active storm check unavailable ({e}).")
-        if place.get("country_code") in ("US", "PR", "VI", "GU"):
-            lines += [f"NWS alert: {a}" for a in _nws_alerts(lat, lon)]
+        # Live hazards: official warnings, storms, ash and disasters near the
+        # point. See hazards.py for the sources and why each is there.
+        from . import hazards
+        found = hazards.near(lat, lon, place.get("country_code"))
+        lines += [hazards.line(h) for h in found["hazards"]]
+        lines += [f"Not checked: {g}." for g in found["gaps"]]
         if lead <= 4:
             dust = _dust_days(lat, lon)
             if dust:

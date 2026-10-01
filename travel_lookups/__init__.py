@@ -1,6 +1,6 @@
 """Read-only flight, rail and weather lookups.
 
-Four modules, one rule each:
+Five modules, one rule each:
 
     flights — AeroAPI published schedules; Google Flights fares, read from
               Google's own pages first (google_flights) and SerpApi, behind a
@@ -9,7 +9,9 @@ Four modules, one rule each:
     rail_fares — live per-train fares read from each operator directly
               (Renfe, Iryo, Ouigo, Trenitalia, Italo, Eurostar, DB, SBB, ÖBB)
     weather — forecast, ranges or typical weather, chosen by how far away the
-              dates are; storms and alerts from NHC and NWS
+              dates are
+    hazards — what is happening near a point now: NWS and MeteoAlarm
+              warnings, NHC storms, volcanic-ash SIGMETs, GDACS disasters
 
 None of them books, holds, or reserves anything. flights and trains convert
 times into the local zone of each airport or station, because the raw values
