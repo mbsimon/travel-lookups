@@ -164,6 +164,8 @@ def test_past_dates_are_refused(fake):
     (25.1, -77.3, "Atlantic hurricane"),          # Nassau
     (20.8, -156.3, "Central Pacific hurricane"),  # Maui
     (40.4, -3.7, None),                           # Madrid
+    (12.43, -86.88, "Atlantic and East Pacific hurricane"),  # León, Nicaragua
+    (9.98, -83.03, "Atlantic hurricane"),         # Limón, Costa Rica
 ])
 def test_storm_basins(lat, lon, basin):
     b = w._basin(lat, lon)

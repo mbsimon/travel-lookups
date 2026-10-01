@@ -309,7 +309,11 @@ def ash(lat: float, lon: float, radius_km: float = ASH_KM) -> list[dict]:
 def ash_from_sigmets(sigmets: list[dict], lat: float, lon: float,
                      radius_km: float = ASH_KM) -> list[dict]:
     out, seen = [], set()
+    now_ts = _now().timestamp()
     for s in sigmets:
+        until = s.get("validTimeTo")
+        if isinstance(until, (int, float)) and until < now_ts:
+            continue  # expired; the feed keeps them for a while
         pts = [(c["lon"], c["lat"]) for c in s.get("coords") or []
                if c.get("lat") is not None]
         if not pts:
@@ -323,7 +327,6 @@ def ash_from_sigmets(sigmets: list[dict], lat: float, lon: float,
         if key in seen:
             continue
         seen.add(key)
-        until = s.get("validTimeTo")
         ends = (datetime.fromtimestamp(until, timezone.utc).isoformat()
                 if isinstance(until, (int, float)) else None)
         out.append(_hazard("ash SIGMET", "volcanic ash", key,

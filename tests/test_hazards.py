@@ -79,7 +79,7 @@ def test_polygon_hole_is_outside():
 # eruption that closed Catania. The live feed keeps only current warnings, so
 # August cannot be replayed; this is the shape a VA SIGMET for Etna takes.
 ETNA = [{"firId": "LIRR", "firName": "LIRR ROMA", "qualifier": "ETNA",
-         "validTimeTo": 1786640400,
+         "validTimeTo": 4102444800,  # 2100; a live, unexpired warning
          "coords": [{"lat": 37.80, "lon": 14.95}, {"lat": 37.85, "lon": 15.20},
                     {"lat": 37.40, "lon": 15.40}, {"lat": 37.35, "lon": 15.00},
                     {"lat": 37.80, "lon": 14.95}]}]
@@ -126,3 +126,8 @@ def test_near_reports_gaps_instead_of_failing(monkeypatch):
     monkeypatch.setattr(hz, "gdacs", lambda lat, lon, names: [])
     out = hz.near(37.85, 15.29, "BS")
     assert out["hazards"] == [] and out["gaps"] == ["ash SIGMETs: down"]
+
+
+def test_expired_ash_warning_is_dropped():
+    old = [dict(ETNA[0], validTimeTo=1786640400)]  # August 2026
+    assert hz.ash_from_sigmets(old, 37.85, 15.29) == []

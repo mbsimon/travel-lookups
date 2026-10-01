@@ -564,6 +564,10 @@ def _outlook(lat: float, lon: float, start: date, end: date) -> list[str]:
 
 def _basin(lat: float, lon: float) -> tuple[str, tuple[int, int], tuple[int, int]] | None:
     """(name, season start (m,d), season end (m,d)) for the tropical-storm basin, if any."""
+    # Central America between Mexico and Colombia faces both oceans; which
+    # coast a point is on is not knowable from a box, so name both seasons.
+    if 7 <= lat < 18 and -92 <= lon <= -77 and not _caribbean_side(lat, lon):
+        return ("Atlantic and East Pacific hurricane", (5, 15), (11, 30))
     if 0 <= lat <= 45 and -100 <= lon <= -10:
         # Mexico's Pacific coast sits west of the isthmus, not in the Atlantic.
         if lon < -90 and lat < 23 and not (lon > -97.5 and lat > 18):
@@ -580,6 +584,11 @@ def _basin(lat: float, lon: float) -> tuple[str, tuple[int, int], tuple[int, int
     if -40 <= lat < 0 and (30 <= lon <= 180 or -180 <= lon <= -120):
         return ("Southern Hemisphere cyclone", (11, 1), (4, 30))
     return None
+
+
+def _caribbean_side(lat: float, lon: float) -> bool:
+    """Yucatan, Belize, Honduras's north coast and points east of Costa Rica."""
+    return lat >= 15 or lon >= -83.5
 
 
 def _in_season(d: date, a: tuple[int, int], b: tuple[int, int]) -> bool:
@@ -677,7 +686,8 @@ def risks(place: dict, start: date, end: date, highs_c: dict[str, float] | None 
             if dust:
                 lines.append("Heavy Saharan-type dust forecast on " + ", ".join(dust) +
                              " (hazy skies, poorer air).")
-    if 10 <= lat <= 30 and -98 <= lon <= -58 and not (lon < -90 and lat < 23):
+    if (10 <= lat <= 30 and -98 <= lon <= -58 and not (lon < -90 and lat < 23)
+            and _caribbean_side(lat, lon)):
         if any(3 <= m <= 10 for m in {start.month, end.month}):
             lines.append("Sargassum season on Caribbean and Gulf coasts (spring to fall). "
                          f"Beaches vary; USF's monthly outlook: {SARGASSUM_URL}")
