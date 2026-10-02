@@ -31,6 +31,7 @@ def _archive_daily(hi=20.0, lo=10.0, wet_every=5):
 def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "CACHE_DIR", tmp_path)
     monkeypatch.setattr(w, "_today", lambda tz=None: TODAY)
+    monkeypatch.setattr(w, "_google_geocode", lambda q: None)  # no key in tests
     calls = []
     geo = {"results": [MADRID]}
     ens_rain = {"value": 0.0}
@@ -208,3 +209,36 @@ def test_coastal_point_carries_the_warm_lows_caveat(fake, monkeypatch):
 def test_inland_point_has_no_coastal_caveat(fake):
     r = w.trip("Madrid", (TODAY + timedelta(days=1)).isoformat())
     assert not any("small island" in s for s in r["summary"])
+
+
+
+def _google(lat, lon, cc, country, name):
+    return {"name": name, "country_code": cc, "country": country, "latitude": lat,
+            "longitude": lon, "source": "google geocoding"}
+
+
+def test_city_with_a_country_uses_google_when_it_agrees(fake, monkeypatch):
+    """'San Sebastián, Spain' must be Donostia, not La Gomera or Puerto Rico."""
+    fake["geo"]["results"] = [
+        {"name": "San Sebastian", "country": "Puerto Rico", "country_code": "PR",
+         "latitude": 18.3, "longitude": -66.99, "population": 11590},
+        {"name": "San Sebastián de La Gomera", "country": "Spain", "country_code": "ES",
+         "latitude": 28.09, "longitude": -17.11, "population": 8964}]
+    asked = []
+    monkeypatch.setattr(w, "_google_geocode", lambda q: asked.append(q) or _google(
+        43.32, -1.98, "ES", "Spain", "Donostia / San Sebastián, Gipuzkoa, Spain"))
+    p = w.resolve("San Sebastián, Spain")
+    assert (round(p["latitude"]), round(p["longitude"])) == (43, -2)
+    assert asked == ["San Sebastián, Spain"]
+    assert w.resolve("San Sebastián", country="ES")["country_code"] == "ES"
+    assert asked[-1] == "San Sebastián, ES"
+
+
+def test_google_in_another_country_is_ignored(fake, monkeypatch):
+    monkeypatch.setattr(w, "_google_geocode", lambda q: _google(18.3, -66.99, "PR", "Puerto Rico", "x"))
+    assert w.resolve("Madrid, Spain")["country_code"] == "ES"
+
+
+def test_no_google_key_falls_back_to_open_meteo(fake, monkeypatch):
+    monkeypatch.setattr(w, "_google_geocode", lambda q: None)
+    assert w.resolve("Madrid, Spain")["name"] == "Madrid"

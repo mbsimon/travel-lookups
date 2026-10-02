@@ -187,6 +187,16 @@ def resolve(place: str, country: str | None = None) -> dict:
 
     name, _, tail = place.partition(",")
     hint = country or (tail.split(",")[-1].strip() if tail else None)
+    if hint:
+        # Open-Meteo's name search misses cities listed under another name:
+        # "San Sebastián" finds Puerto Rico and La Gomera, never "Donostia /
+        # San Sebastian", so a Basque November came back at 72F with a
+        # hurricane-season warning (2026-10-02). Google knows the city; its
+        # answer is kept only when the country matches the hint.
+        g = _google_geocode(place if tail else f"{place}, {hint}")
+        if g and hint.strip().lower() in {(g.get("country_code") or "").lower(),
+                                          (g.get("country") or "").lower()}:
+            return g
     try:
         data = _get(GEOCODE_URL, {"name": name.strip(), "count": 10, "language": "en"},
                     ttl=86400)
@@ -249,9 +259,10 @@ def _google_geocode(place: str) -> dict | None:
         return None
     r = res[0]
     loc = r["geometry"]["location"]
-    cc = next((c["short_name"] for c in r.get("address_components", [])
-               if "country" in c.get("types", [])), None)
-    return {"name": r.get("formatted_address"), "country_code": cc,
+    country = next((c for c in r.get("address_components", [])
+                    if "country" in c.get("types", [])), {})
+    return {"name": r.get("formatted_address"), "country_code": country.get("short_name"),
+            "country": country.get("long_name"),
             "latitude": loc["lat"], "longitude": loc["lng"], "source": "google geocoding"}
 
 
