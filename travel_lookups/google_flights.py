@@ -75,7 +75,13 @@ CABIN_OF_FORA_CODE = {"Y": 1, "S": 2, "W": 2, "C": 3, "J": 3, "F": 4, "P": 4}
 ADULT, CHILD, INFANT_IN_SEAT, INFANT_ON_LAP = 1, 2, 3, 4
 
 PAGE_TIMEOUT_SECONDS = float(os.getenv("GOOGLE_FLIGHTS_TIMEOUT", "20"))
-LAUNCH_TIMEOUT_SECONDS = 60
+LAUNCH_TIMEOUT_SECONDS = 90
+# A new browser has an empty cache, and its first Google Flights pages arrive
+# too slowly for PAGE_TIMEOUT_SECONDS: on 2026-10-02, 2 of 3 cold reads timed
+# out while 3 of 3 warm ones read fine, so every restart sent the next real
+# search to SerpApi. One throwaway page right after launch fixed 3 of 3.
+WARMUP_URL = "https://www.google.com/travel/flights?hl=en&curr=USD"
+WARMUP_SECONDS = 30
 SETTLE_SECONDS = 0.8          # rows keep arriving for a moment after the first one
 EXPAND_SECONDS = 1.2          # after "View more flights" / "Flight details"
 POLL_SECONDS = 0.25
@@ -724,6 +730,7 @@ class _Browser:
                 else:
                     await route.continue_()
             await ctx.route("**/*", trim)
+            await _prime(ctx)
             return browser, ctx, asyncio.Semaphore(MAX_PAGES)
         try:
             self._browser, self._ctx, self._sem = asyncio.run_coroutine_threadsafe(
@@ -796,6 +803,49 @@ _CARDS_JS = """() => [...document.querySelectorAll('[aria-label^="Continue to bo
 
 _TIMS_JS = """() => [...new Set([...document.querySelectorAll('[data-travelimpactmodelwebsiteurl]')]
   .map(e => e.getAttribute('data-travelimpactmodelwebsiteurl')))]"""
+
+async def _prime(ctx) -> bool:
+    """Load one Google Flights page so the first real read finds a warm cache.
+
+    Best effort: a warm-up that fails or times out costs the first read its
+    head start, never the read itself.
+    """
+    page = None
+    try:
+        page = await ctx.new_page()
+        await page.goto(WARMUP_URL, wait_until="domcontentloaded", timeout=WARMUP_SECONDS * 1000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=WARMUP_SECONDS * 1000)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+
+def warm() -> bool:
+    """Start the browser now (and warm it) instead of on the first real read.
+
+    For a long-running server: call it in a background thread at boot so the
+    first search after a deploy is as fast as the rest. False when the direct
+    source is off or the browser can't start; the reads then fall back as usual.
+    """
+    if not enabled():
+        return False
+    try:
+        with _browser._lock:
+            if not _browser._alive():
+                _browser._start()
+        return True
+    except Exception:
+        return False
+
 
 _PAX_JS = """() => { const t = document.body.innerText; const i = t.indexOf('Prices include');
   return i < 0 ? null : t.slice(i, i + 120); }"""

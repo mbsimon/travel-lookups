@@ -133,3 +133,49 @@ def test_no_single_match_means_no_substitution():
     from travel_lookups import flight_qa
     routing = {"segments": [[("JFK", "LHR", "2026-11-10 07:00")]]}
     assert flight_qa._google_numbers(_FakeDirect(), routing, 1, 0, 1) is None
+
+
+
+# ─── warm-up (2026-10-02: cold browsers timed out 2 of 3 first reads) ────────
+
+class _Page:
+    def __init__(self, fail_goto=False, fail_idle=False):
+        self.fail_goto, self.fail_idle, self.closed, self.visited = fail_goto, fail_idle, False, []
+
+    async def goto(self, url, **kw):
+        self.visited.append(url)
+        if self.fail_goto:
+            raise RuntimeError("net down")
+
+    async def wait_for_load_state(self, state, **kw):
+        if self.fail_idle:
+            raise TimeoutError("still busy")
+
+    async def close(self):
+        self.closed = True
+
+
+class _Ctx:
+    def __init__(self, page):
+        self.page = page
+
+    async def new_page(self):
+        return self.page
+
+
+def test_prime_loads_google_flights_and_closes_the_page():
+    import asyncio
+    page = _Page()
+    assert asyncio.run(g._prime(_Ctx(page))) is True
+    assert page.visited == [g.WARMUP_URL] and page.closed
+
+
+def test_prime_never_raises():
+    import asyncio
+    slow, down = _Page(fail_idle=True), _Page(fail_goto=True)
+    assert asyncio.run(g._prime(_Ctx(slow))) is True and slow.closed
+    assert asyncio.run(g._prime(_Ctx(down))) is False and down.closed
+
+
+def test_warm_is_off_when_the_direct_source_is_off():
+    assert g.warm() is False  # conftest sets GOOGLE_FLIGHTS_DIRECT=0
