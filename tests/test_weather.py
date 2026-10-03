@@ -242,3 +242,42 @@ def test_google_in_another_country_is_ignored(fake, monkeypatch):
 def test_no_google_key_falls_back_to_open_meteo(fake, monkeypatch):
     monkeypatch.setattr(w, "_google_geocode", lambda q: None)
     assert w.resolve("Madrid, Spain")["name"] == "Madrid"
+
+
+
+def test_climate_history_is_read_at_the_place_not_a_10km_cell(fake, monkeypatch):
+    """Funchal rounded to 0.1 degree sat 1,233 m up the mountain: 52F instead of ~70F."""
+    asked = []
+    real = w._get
+
+    def spy(url, params=None, ttl=0, _retry=True):
+        if url == w.ARCHIVE_URL:
+            asked.append((params["latitude"], params["longitude"]))
+        return real(url, params, ttl, _retry)
+    monkeypatch.setattr(w, "_get", spy)
+    w.typical({"latitude": 32.6506129, "longitude": -16.9082357}, "2026-12-27", "2027-01-03")
+    assert asked == [(32.65, -16.91)]
+
+
+@pytest.mark.parametrize("place,label", [
+    ({"name": "Rome, Metropolitan City of Rome Capital, Italy", "country": "Italy"},
+     "Rome, Metropolitan City of Rome Capital, Italy"),
+    ({"name": "Funchal, Portugal", "country": "Portugal"}, "Funchal, Portugal"),
+    ({"name": "Rome", "admin1": "Lazio", "country": "Italy"}, "Rome, Lazio, Italy"),
+    ({"name": "Valletta", "admin1": "Valletta", "country": "Malta"}, "Valletta, Malta"),
+])
+def test_place_label_does_not_repeat_itself(place, label):
+    assert w._place_label(place) == label
+
+
+
+def test_small_day_night_gap_gets_the_coastal_caveat(fake, monkeypatch):
+    monkeypatch.setattr(w, "_archive", lambda lat, lon: {
+        **{k: v for k, v in _archive_daily(hi=16.0, lo=13.0).items()}, "_elevation_m": 20})
+    t = w.typical(MADRID, "2027-07-01", "2027-07-05")
+    assert any("small island" in c for c in t["caveats"])
+
+
+def test_inland_gap_has_no_coastal_caveat(fake):
+    t = w.typical(MADRID, "2027-07-01", "2027-07-05")  # 20/10 C
+    assert not any("small island" in c for c in t["caveats"])

@@ -80,6 +80,7 @@ HEAT_C = 35.0                        # 95 F
 # on 2026-09-30: every model put Nassau's lows at 81-82 F while the airport
 # read 75 F, because the cell mixes in warm sea.
 COASTAL_M = 15
+SEA_DOMINATED_SPREAD_C = 4.0         # median high minus low; inland is ~6-9 C
 DUST_UGM3 = 100.0
 STORM_WATCH_KM = 1500
 STORM_LEAD_DAYS = 14
@@ -154,7 +155,12 @@ _LATLON = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$")
 
 
 def _place_label(p: dict) -> str:
-    bits = [p.get("name"), p.get("admin1"), p.get("country")]
+    """'Rome, Lazio, Italy'. A Google name already carries the country (and
+    often the region), so a part already in the name is not repeated; that
+    printed 'Rome, Metropolitan City of Rome Capital, Italy, Italy'."""
+    name = p.get("name") or ""
+    bits = [name] + [b for b in (p.get("admin1"), p.get("country"))
+                     if b and b.lower() not in name.lower()]
     return ", ".join(b for b in bits if b)
 
 
@@ -411,17 +417,26 @@ def _climate_span() -> tuple[int, int]:
     return last - CLIMATE_YEARS + 1, last
 
 
+# Climate history is fetched at the place itself, to about 1 km. It used to be
+# rounded to 0.1 degree (~10 km) so neighbors could share a cache file, which
+# on a steep island moves the point up a mountain: Funchal's rounded point sat
+# at 1,233 m and came back at 52F for late December instead of about 70F
+# (2026-10-03). The archive then corrects for the real elevation there.
+CLIMATE_GRID_DECIMALS = 2
+
+
 def _archive(lat: float, lon: float) -> dict[str, list]:
-    """30 years of daily history for a ~10 km cell, cached on disk forever."""
+    """30 years of daily history for the place (to ~1 km), cached on disk forever."""
     first, last = _climate_span()
-    key = f"{lat:.1f}_{lon:.1f}_{first}_{last}"
+    lat, lon = round(lat, CLIMATE_GRID_DECIMALS), round(lon, CLIMATE_GRID_DECIMALS)
+    key = f"{lat:.2f}_{lon:.2f}_{first}_{last}"
     path = CACHE_DIR / "climate" / f"{key}.json"
     with _archive_lock:
         try:
             return json.loads(path.read_text())
         except (OSError, ValueError):
             pass
-        d = _get(ARCHIVE_URL, {"latitude": round(lat, 1), "longitude": round(lon, 1),
+        d = _get(ARCHIVE_URL, {"latitude": lat, "longitude": lon,
                                "start_date": f"{first}-01-01", "end_date": f"{last}-12-31",
                                "daily": "temperature_2m_max,temperature_2m_min,"
                                         "precipitation_sum,daylight_duration",
@@ -518,6 +533,12 @@ def typical(place: dict, start: str | date, end: str | date, units: str = "F") -
     if elev is not None and elev >= 1500:
         caveats.append("Mountain terrain: the 10 km climate grid smooths out valleys "
                        "and peaks, so local temperatures can differ a lot.")
+    # A day/night gap this small means the grid cell is mostly sea, which
+    # props the lows up: Funchal and Valletta read 60F and 55F for late
+    # December lows, about 5F warm (2026-10-03).
+    if med_hi - med_lo < SEA_DOMINATED_SPREAD_C:
+        caveats.append("Coast or small island: typical lows often run 3-5°F warm here "
+                       "because the climate grid mixes in the sea; highs are more reliable.")
     if abs(place["latitude"]) < 23.5:
         caveats.append("Tropics: this climate record tends to overstate rain days; "
                        "showers are often short.")
