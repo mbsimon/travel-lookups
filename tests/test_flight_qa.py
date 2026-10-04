@@ -192,3 +192,32 @@ def test_multi_city_walks_every_leg_before_pricing():
     # Fable's capture chose DL63+DL2275 on leg 3, so Google's leg-3 list does
     # not carry AA8666+AA4933: the walk must stop there and say which leg.
     assert out["verdict"] == "NO_PUBLIC_MATCH" and "leg 3" in out["reason"]
+
+
+# ─── Another cabin is never the comparison (2026-10-04) ──────────────────────
+
+def test_google_cabin_reads_title_and_terms():
+    assert q.google_cabin({"option_title": "DL Premium Select Refundable"}) == 2
+    assert q.google_cabin({"option_title": "Delta One Classic"}) == 3
+    assert q.google_cabin({"option_title": None, "terms": ["Lie-flat seat"]}) == 3
+    assert q.google_cabin({"option_title": "Delta Premium Select Extra",
+                           "terms": ["Premium seat", "Not included: Business"]}) == 2
+    assert q.google_cabin({"option_title": "Delta Main Classic"}) == 1
+    assert q.google_cabin({"option_title": "Delta First Classic"}) == 4
+    assert q.google_cabin({"option_title": None, "terms": []}) is None
+
+
+def test_a_cheaper_fare_in_another_cabin_is_never_the_comparison(monkeypatch):
+    """The Weatherford JNB-SFO check matched Delta One Classic against Premium
+    Select by terms and called Fora $4,892 above retail."""
+    monkeypatch.setattr(q, "same_brand", lambda *a, **k: False)   # force the terms path
+    tok = token_of(S1, "DL2294+DL278")["booking_token"]
+    b = copy.deepcopy(S2)
+    b["booking_options"].append({"together": {
+        "book_with": "Delta", "airline": True, "price": 1000,
+        "option_title": "Delta Premium Select",
+        "extensions": ["Premium seat", "Free change, possible fare difference", "No refunds"],
+        "baggage_prices": ["2 free checked bags"]}})
+    out = run(["DL2294", "DL278"], fetch=Fake(S1, booking={tok: b}))
+    assert out["public"]["compared_fare"]["option_title"] != "Delta Premium Select"
+    assert out["public"]["compared_fare"]["per_person_usd"] > 500

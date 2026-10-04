@@ -269,7 +269,7 @@ def check(pool: list[dict], flights: list[str], *, cabins: list[str], adults: in
               "ladder": g_ladder}
     alts = _alternatives(first_list, routing, pool, options, tickets, one_way=p["type"] == 2)
     return _compare(routing, q, fora, public, g_ladder, tickets, alts,
-                    pool_age_minutes, max(ages), today)
+                    pool_age_minutes, max(ages), today, p["first"]["travel_class"])
 
 
 def _google_numbers(direct, routing, adults, children, cabin) -> list[str] | None:
@@ -372,12 +372,43 @@ def check_direct(pool: list[dict], flights: list[str], *, cabins: list[str], adu
               "headline_party_total_usd": min(g["party_total_usd"] for g in g_ladder),
               "ladder": g_ladder}
     return _compare(routing, q, fora, public, g_ladder, tickets, alts_now(),
-                    pool_age_minutes, age, today)
+                    pool_age_minutes, age, today, cabin)
+
+
+# A Google fare in another cabin is never the comparison. Google lists every
+# cabin on the booking page; on 2026-10-04 a Delta One Classic fare was
+# matched by terms against "DL Premium Select Refundable" and called $4,892
+# above retail.
+_CABIN_WORDS = (
+    (2, re.compile(r"premium select|premium economy|premium plus|premium seat|"
+                   r"\bpremium\b|comfort\+|economy plus")),
+    (4, re.compile(r"\bfirst\b|la premi[eè]re")),
+    (3, re.compile(r"delta one|polaris|\bbusiness\b|upper class|\bmint\b|club world|"
+                   r"club suite|lie-flat|flat-bed|flatbed|qsuite")),
+    (1, re.compile(r"\beconomy\b|\bmain\b|\bcomfort\b|\bbasic\b|\bstandard seat\b")),
+)
+
+
+def google_cabin(g: dict) -> int | None:
+    """The cabin of a Google booking option as TRAVEL_CLASS (1-4), or None.
+
+    Read from the fare's title and terms; "Not included: Business" lines are
+    ignored, since they name what the fare lacks.
+    """
+    terms = [str(t) for t in g.get("terms") or [] if not str(t).lower().startswith("not included")]
+    text = " ".join([str(g.get("option_title") or "")] + terms).lower()
+    for cls, words in _CABIN_WORDS:
+        if words.search(text):
+            return cls
+    return None
 
 
 def _compare(routing, q, fora, public, g_ladder, tickets, alts, pool_age_minutes,
-             public_age, today) -> dict:
-    """The comparison: same brand first, then same family by terms, never basic."""
+             public_age, today, cabin_class: int | None = None) -> dict:
+    """The comparison: same brand first, then same family by terms, never basic,
+    never another cabin."""
+    if cabin_class:
+        g_ladder = [g for g in g_ladder if google_cabin(g) in (None, cabin_class)]
     exact = [g for g in g_ladder if len(q["brands"]) == 1
              and same_brand(q["brands"][0], g.get("option_title"), g.get("seller"))]
     by_terms = [g for g in g_ladder if g["family"] == q["family"]]
