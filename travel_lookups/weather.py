@@ -12,11 +12,10 @@ One question, answered by how far away the date is:
               a real lean warmer or wetter than normal
   beyond 46   typical weather only
 
-"Typical" is computed here from 30 years of ERA5 daily data for the exact
-place and dates, padded a week each side: median high and low, the range 8
-years in 10 fall inside, the chance of a wet day, the best and worst year, and
-whether the last 10 years ran warmer than the 30. The history for a place is
-fetched once and cached, because a 30-year request is heavy on the free tier.
+"Typical" is computed here from the last 10 years of ERA5 daily data for the
+exact place and dates, padded a week each side: median high and low, the range
+8 years in 10 fall inside, the chance of a wet day, and the best and worst
+year. Only the months the trip touches are fetched, once per place, and kept.
 
 Research behind the cutoffs: vault `20 Projects/Weather MCP — Build Plan
 (2026-09-30)`. A single-day forecast past day 10 is right about half the time,
@@ -70,8 +69,14 @@ RANGES_MAX = 15
 OUTLOOK_MAX = 46
 MAX_DAYS_LISTED = 21
 
-CLIMATE_YEARS = 30
-CLIMATE_RECENT_YEARS = 10
+# Ten recent years, fetched only for the months the trip touches (2026-10-06).
+# The first version pulled 30 full years per place, which Open-Meteo's free
+# tier counts as ~780 calls (every 14 days is one), so six new places used up
+# an hour's allowance. Ten years gives the same typical high within about a
+# degree, makes "8 years in 10" literal, and reflects today's warmer climate.
+# A new place now costs ~50 calls; anything already fetched costs none.
+CLIMATE_YEARS = 10
+CLIMATE_FETCH_WORKERS = 5
 CLIMATE_PAD_DAYS = 7
 WET_DAY_MM = 1.0                     # Weather Spark's 0.04 in
 LEAN_PCT = 70                        # share of 46-day runs needed to call a lean
@@ -132,9 +137,9 @@ def _get(url: str, params: dict | None = None, ttl: float = 0, _retry: bool = Tr
         raise WeatherError(f"{_host(url)} answered HTTP {r.status_code} without JSON")
     if r.status_code >= 400 or (isinstance(data, dict) and data.get("error")):
         reason = data.get("reason") if isinstance(data, dict) else None
-        # The free tier counts a 30-year history request as hundreds of calls,
-        # so two new places in one minute can trip the per-minute limit. That
-        # limit resets on the minute; wait once rather than fail the answer.
+        # The free tier counts long history requests as many calls, so a burst
+        # of new places can trip the per-minute limit. That limit resets on the
+        # minute; wait once rather than fail the answer.
         if _retry and reason and "Minutely" in reason:
             time.sleep(RATE_LIMIT_WAIT_S)
             return _get(url, params, ttl, _retry=False)
@@ -425,30 +430,53 @@ def _climate_span() -> tuple[int, int]:
 CLIMATE_GRID_DECIMALS = 2
 
 
-def _archive(lat: float, lon: float) -> dict[str, list]:
-    """30 years of daily history for the place (to ~1 km), cached on disk forever."""
+def _month_end(d: date) -> date:
+    nxt = date(d.year + (d.month == 12), d.month % 12 + 1, 1)
+    return nxt - timedelta(days=1)
+
+
+def _archive(lat: float, lon: float, start: date, days: int) -> dict[str, list]:
+    """Daily history at the place (to ~1 km) for the whole months covering a
+    window of `days` starting on `start`'s calendar date, in each of the last
+    CLIMATE_YEARS years. One small request per year, cached on disk forever,
+    so any later window inside those months at this place costs nothing."""
     first, last = _climate_span()
     lat, lon = round(lat, CLIMATE_GRID_DECIMALS), round(lon, CLIMATE_GRID_DECIMALS)
-    key = f"{lat:.2f}_{lon:.2f}_{first}_{last}"
+    spans = []
+    for y in range(first, last + 1):
+        a = _same_day(y, start)
+        spans.append((a.replace(day=1), _month_end(a + timedelta(days=days - 1))))
+    sig = f"{spans[0][0]:%m}{spans[0][1]:%m}{(spans[0][1].year - spans[0][0].year)}"
+    key = f"{lat:.2f}_{lon:.2f}_{first}_{last}_{sig}"
     path = CACHE_DIR / "climate" / f"{key}.json"
     with _archive_lock:
         try:
             return json.loads(path.read_text())
         except (OSError, ValueError):
             pass
-        d = _get(ARCHIVE_URL, {"latitude": lat, "longitude": lon,
-                               "start_date": f"{first}-01-01", "end_date": f"{last}-12-31",
-                               "daily": "temperature_2m_max,temperature_2m_min,"
-                                        "precipitation_sum,daylight_duration",
-                               "timezone": "auto"})
-        daily = d.get("daily") or {}
-        daily["_elevation_m"] = d.get("elevation")
+
+    def one(span):
+        return _get(ARCHIVE_URL, {"latitude": lat, "longitude": lon,
+                                  "start_date": span[0].isoformat(),
+                                  "end_date": span[1].isoformat(),
+                                  "daily": "temperature_2m_max,temperature_2m_min,"
+                                           "precipitation_sum,daylight_duration",
+                                  "timezone": "auto"})
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=CLIMATE_FETCH_WORKERS) as pool:
+        parts = list(pool.map(one, spans))
+    daily: dict[str, list] = {}
+    for part in parts:
+        for k, v in (part.get("daily") or {}).items():
+            daily.setdefault(k, []).extend(v)
+    daily["_elevation_m"] = parts[0].get("elevation") if parts else None
+    with _archive_lock:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(daily))
         except OSError:
             pass  # a cache write failure must never break a lookup
-        return daily
+    return daily
 
 
 def _same_day(year: int, d: date) -> date:
@@ -459,12 +487,14 @@ def _same_day(year: int, d: date) -> date:
 
 
 def typical(place: dict, start: str | date, end: str | date, units: str = "F") -> dict:
-    """What these dates are usually like at this place, from 30 years of data."""
+    """What these dates are usually like at this place, from the last 10 years."""
     units = _norm_units(units)
     start, end = _parse_date(start), _parse_date(end)
     if end < start:
         start, end = end, start
-    daily = _archive(place["latitude"], place["longitude"])
+    daily = _archive(place["latitude"], place["longitude"],
+                     start - timedelta(days=CLIMATE_PAD_DAYS),
+                     (end - start).days + 1 + 2 * CLIMATE_PAD_DAYS)
     idx = {t: i for i, t in enumerate(daily.get("time", []))}
     first, last = _climate_span()
     trip_days = (end - start).days + 1
@@ -493,8 +523,6 @@ def typical(place: dict, start: str | date, end: str | date, units: str = "F") -
     rains = [v for r in by_year.values() for v in r["rain"]]
     lights = [v for r in by_year.values() for v in r["light"]]
     wet = sum(1 for v in rains if v >= WET_DAY_MM) / max(len(rains), 1)
-    recent = [v for y, r in by_year.items() if y > last - CLIMATE_RECENT_YEARS for v in r["hi"]]
-    shift_c = statistics.median(recent) - statistics.median(his) if recent else 0.0
 
     def yr(fn):
         return max(by_year, key=lambda y: fn(by_year[y]))
@@ -521,11 +549,6 @@ def typical(place: dict, start: str | date, end: str | date, units: str = "F") -
     ]
     if daylight_h:
         lines.append(f"Daylight about {daylight_h:.1f} hours.")
-    if abs(shift_c) >= 0.5:
-        word = "warmer" if shift_c > 0 else "cooler"
-        diff = abs(shift_c) * (9 / 5 if units == "F" else 1)
-        lines.append(f"The last {CLIMATE_RECENT_YEARS} years ran about "
-                     f"{diff:.0f}{deg} {word} than the {CLIMATE_YEARS}-year figure.")
     lines.append(f"Hottest year for these dates {hottest}, coolest {coolest}; "
                  f"wettest {wettest}, driest {driest}.")
     caveats = []
@@ -552,7 +575,6 @@ def typical(place: dict, start: str | date, end: str | date, units: str = "F") -
         "wet_day_pct": round(wet * 100), "expected_wet_days": expected_wet,
         "trip_days": trip_days,
         "daylight_hours": round(daylight_h, 1) if daylight_h else None,
-        "recent_shift": round(shift_c * (9 / 5 if units == "F" else 1), 1),
         "hottest_year": hottest, "coolest_year": coolest,
         "wettest_year": wettest, "driest_year": driest,
         "sea_temperature": "not available for typical weather; forecast only, within 7 days",
@@ -854,8 +876,8 @@ def trip(place: str, start: str, end: str | None = None, units: str = "F",
 
     first_lead = leads[days[0]]
     if first_lead > OUTLOOK_MAX:
-        client_note = ("This is what these dates are usually like, based on 30 years of "
-                       "weather records. A real forecast starts about two weeks out.")
+        client_note = ("This is what these dates are usually like, based on the last "
+                       "10 years of weather records. A real forecast starts about two weeks out.")
     elif first_lead > RANGES_MAX:
         client_note = ("This is what these dates are usually like. Day-by-day forecasts "
                        "become useful about a week before you go.")

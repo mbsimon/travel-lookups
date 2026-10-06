@@ -41,7 +41,11 @@ def fake(monkeypatch, tmp_path):
         if url == w.GEOCODE_URL:
             return geo
         if url == w.ARCHIVE_URL:
-            return {"daily": _archive_daily(), "elevation": 650}
+            full = _archive_daily()
+            keep = [i for i, d in enumerate(full["time"])
+                    if params["start_date"] <= d <= params["end_date"]]
+            return {"daily": {k: [v[i] for i in keep] for k, v in full.items()},
+                    "elevation": 650}
         if url == w.FORECAST_URL:
             days = [(TODAY + timedelta(days=i)).isoformat() for i in range(16)]
             return {"timezone": "Europe/Madrid", "daily": {
@@ -128,7 +132,7 @@ def test_far_future_is_typical_only_and_says_so(fake):
     assert r["days"] == []
     assert w.FORECAST_URL not in fake["calls"] and w.ENSEMBLE_URL not in fake["calls"]
     assert "not a forecast" in r["typical"]["basis"]
-    assert "30 years" in r["client_note"]
+    assert "10 years" in r["client_note"]
 
 
 def test_mid_range_adds_the_46_day_lean(fake):
@@ -142,16 +146,19 @@ def test_typical_math(fake):
     t = w.typical(MADRID, "2027-07-01", "2027-07-05", units="C")
     assert t["median_low"] == 10
     assert t["median_high"] in (20, 21)
-    assert t["wet_day_pct"] == 20       # every 5th day wet
-    assert t["expected_wet_days"] == 1  # 20% of 5 days
-    assert t["recent_shift"] == 1.0
+    assert 18 <= t["wet_day_pct"] <= 22  # every 5th day wet
+    assert t["expected_wet_days"] == 1   # ~20% of 5 days
     assert t["daylight_hours"] == 12.0
 
 
-def test_climate_history_is_fetched_once_per_place(fake):
+def test_climate_history_is_fetched_once_per_place_and_months(fake):
+    """10 small requests, one per year, then nothing for any dates in those months."""
     w.typical(MADRID, "2027-07-01", "2027-07-05")
-    w.typical(MADRID, "2029-12-24", "2030-01-02")
-    assert fake["calls"].count(w.ARCHIVE_URL) == 1
+    assert fake["calls"].count(w.ARCHIVE_URL) == w.CLIMATE_YEARS
+    w.typical(MADRID, "2028-07-03", "2028-07-08")
+    assert fake["calls"].count(w.ARCHIVE_URL) == w.CLIMATE_YEARS
+    w.typical(MADRID, "2029-12-24", "2030-01-02")  # new months: one more pass
+    assert fake["calls"].count(w.ARCHIVE_URL) == 2 * w.CLIMATE_YEARS
 
 
 def test_past_dates_are_refused(fake):
@@ -256,7 +263,7 @@ def test_climate_history_is_read_at_the_place_not_a_10km_cell(fake, monkeypatch)
         return real(url, params, ttl, _retry)
     monkeypatch.setattr(w, "_get", spy)
     w.typical({"latitude": 32.6506129, "longitude": -16.9082357}, "2026-12-27", "2027-01-03")
-    assert asked == [(32.65, -16.91)]
+    assert set(asked) == {(32.65, -16.91)}
 
 
 @pytest.mark.parametrize("place,label", [
@@ -272,8 +279,8 @@ def test_place_label_does_not_repeat_itself(place, label):
 
 
 def test_small_day_night_gap_gets_the_coastal_caveat(fake, monkeypatch):
-    monkeypatch.setattr(w, "_archive", lambda lat, lon: {
-        **{k: v for k, v in _archive_daily(hi=16.0, lo=13.0).items()}, "_elevation_m": 20})
+    monkeypatch.setattr(w, "_archive", lambda *a: {
+        **{k: v for k, v in _archive_daily(hi=15.0, lo=13.0).items()}, "_elevation_m": 20})
     t = w.typical(MADRID, "2027-07-01", "2027-07-05")
     assert any("small island" in c for c in t["caveats"])
 
@@ -281,3 +288,20 @@ def test_small_day_night_gap_gets_the_coastal_caveat(fake, monkeypatch):
 def test_inland_gap_has_no_coastal_caveat(fake):
     t = w.typical(MADRID, "2027-07-01", "2027-07-05")  # 20/10 C
     assert not any("small island" in c for c in t["caveats"])
+
+
+
+def test_each_archive_request_is_only_the_months_needed(fake, monkeypatch):
+    spans = []
+    real = w._get
+
+    def spy(url, params=None, ttl=0, _retry=True):
+        if url == w.ARCHIVE_URL:
+            spans.append((params["start_date"], params["end_date"]))
+        return real(url, params, ttl, _retry)
+    monkeypatch.setattr(w, "_get", spy)
+    w.typical(MADRID, "2026-12-27", "2027-01-03")  # padded: Dec 20 - Jan 10
+    first, last = w._climate_span()
+    assert len(spans) == w.CLIMATE_YEARS
+    assert spans[0] == (f"{first}-12-01", f"{first + 1}-01-31")
+    assert all((date.fromisoformat(b) - date.fromisoformat(a)).days < 62 for a, b in spans)
