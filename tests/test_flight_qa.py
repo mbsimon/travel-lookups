@@ -207,6 +207,19 @@ def test_google_cabin_reads_title_and_terms():
     assert q.google_cabin({"option_title": None, "terms": []}) is None
 
 
+def test_a_perk_named_premium_is_not_the_cabin():
+    """2026-10-07: United Business lists "Premium lounge access", which read as
+    premium economy, so a $13,275 same-price match came back TERMS_UNKNOWN."""
+    assert q.google_cabin({"option_title": "Business",
+                           "terms": ["Priority boarding", "Premium lounge access",
+                                     "2 free checked bags per passenger"]}) == 3
+    assert q.google_cabin({"option_title": "Economy Fully Refundable",
+                           "terms": ["Premium seat for a fee", "Not included: Business"]}) == 1
+    assert q.google_cabin({"option_title": None,
+                           "terms": ["Premium lounge access", "Lie-flat seat"]}) == 3
+    assert q.google_cabin({"option_title": None, "terms": ["Premium seat for a fee"]}) is None
+
+
 def test_a_cheaper_fare_in_another_cabin_is_never_the_comparison(monkeypatch):
     """The Weatherford JNB-SFO check matched Delta One Classic against Premium
     Select by terms and called Fora $4,892 above retail."""

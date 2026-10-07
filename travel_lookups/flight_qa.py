@@ -380,7 +380,7 @@ def check_direct(pool: list[dict], flights: list[str], *, cabins: list[str], adu
 # matched by terms against "DL Premium Select Refundable" and called $4,892
 # above retail.
 _CABIN_WORDS = (
-    (2, re.compile(r"premium select|premium economy|premium plus|premium seat|"
+    (2, re.compile(r"premium select|premium economy|premium plus|"
                    r"\bpremium\b|comfort\+|economy plus")),
     (4, re.compile(r"\bfirst\b|la premi[eè]re")),
     (3, re.compile(r"delta one|polaris|\bbusiness\b|upper class|\bmint\b|club world|"
@@ -389,18 +389,31 @@ _CABIN_WORDS = (
 )
 
 
-def google_cabin(g: dict) -> int | None:
-    """The cabin of a Google booking option as TRAVEL_CLASS (1-4), or None.
+# Terms that name a perk or an upsell, never the cabin flown: United Business
+# lists "Premium lounge access" and economy lists "Premium seat for a fee".
+# On 2026-10-07 the first made a $13,275 Business fare read as premium
+# economy, so a same-price match came back TERMS_UNKNOWN.
+_PERK_TERM = re.compile(r"^not included|lounge|for a fee|upgrade|priority|seat selection")
 
-    Read from the fare's title and terms; "Not included: Business" lines are
-    ignored, since they name what the fare lacks.
-    """
-    terms = [str(t) for t in g.get("terms") or [] if not str(t).lower().startswith("not included")]
-    text = " ".join([str(g.get("option_title") or "")] + terms).lower()
+
+def _cabin_in(text: str) -> int | None:
     for cls, words in _CABIN_WORDS:
         if words.search(text):
             return cls
     return None
+
+
+def google_cabin(g: dict) -> int | None:
+    """The cabin of a Google booking option as TRAVEL_CLASS (1-4), or None.
+
+    The fare's own title decides when it names a cabin. Otherwise its terms
+    do, leaving out lines that name a perk, an upsell or what the fare lacks.
+    """
+    title = _cabin_in(str(g.get("option_title") or "").lower())
+    if title is not None:
+        return title
+    terms = [str(t).lower() for t in g.get("terms") or []]
+    return _cabin_in(" ".join(t for t in terms if not _PERK_TERM.search(t)))
 
 
 def _compare(routing, q, fora, public, g_ladder, tickets, alts, pool_age_minutes,
