@@ -146,6 +146,17 @@ def _legs(it: dict) -> list[dict]:
     for leg in it.get("legs") or []:
         segs, lays, seg_min = [], [], []
         air = [t for t in leg.get("timeline") or [] if t.get("type") == "air"]
+        keys = list(leg.get("segmentKeys") or [])
+        eq = list(leg.get("equipmentCodes") or [])
+        ops = list(leg.get("operatingAirlines") or [])
+        flights = [{
+            "flight": keys[k][14:].upper() if k < len(keys) and len(keys[k]) > 14 else None,
+            "from": (t.get("locations") or [""])[0], "to": (t.get("locations") or [""])[-1],
+            "departs_at": t.get("startsAt"), "arrives_at": t.get("endsAt"),
+            "minutes": int(t.get("elapsedTime") or 0),
+            "operated_by": ops[k] if k < len(ops) else None,
+            "aircraft_code": eq[k] if k < len(eq) else None,
+        } for k, t in enumerate(air)]
         for t in leg.get("timeline") or []:
             if t.get("type") == "air":
                 locs = t.get("locations") or ["", ""]
@@ -188,6 +199,7 @@ def _legs(it: dict) -> list[dict]:
             "airline": leg.get("marketingAirline"),
             "operated_by": list(dict.fromkeys(leg.get("operatingAirlines") or [])),
             "equipment": leg.get("equipmentCodes"),
+            "flights": flights,
         })
     return out
 
@@ -371,6 +383,37 @@ def _public_fare(f: dict) -> dict:
     return {k: v for k, v in f.items() if not k.startswith("_")}
 
 
+# IATA aircraft codes as Fora returns them, named the way a client reads them.
+AIRCRAFT = {
+    "319": "Airbus A319", "320": "Airbus A320", "32N": "Airbus A320neo",
+    "321": "Airbus A321", "32Q": "Airbus A321neo", "21N": "Airbus A321neo",
+    "332": "Airbus A330-200", "333": "Airbus A330-300", "339": "Airbus A330-900neo",
+    "338": "Airbus A330-800neo", "359": "Airbus A350-900", "351": "Airbus A350-1000",
+    "35K": "Airbus A350-1000", "388": "Airbus A380", "221": "Airbus A220-100",
+    "223": "Airbus A220-300", "73H": "Boeing 737-800", "738": "Boeing 737-800",
+    "739": "Boeing 737-900", "7M8": "Boeing 737 MAX 8", "7M9": "Boeing 737 MAX 9",
+    "752": "Boeing 757-200", "753": "Boeing 757-300", "763": "Boeing 767-300",
+    "76W": "Boeing 767-300", "764": "Boeing 767-400", "772": "Boeing 777-200",
+    "77L": "Boeing 777-200LR", "77W": "Boeing 777-300ER", "773": "Boeing 777-300",
+    "788": "Boeing 787-8", "789": "Boeing 787-9", "781": "Boeing 787-10",
+    "744": "Boeing 747-400", "74H": "Boeing 747-8", "748": "Boeing 747-8",
+    "E75": "Embraer E175", "E90": "Embraer E190", "E95": "Embraer E195",
+    "295": "Embraer E195-E2", "290": "Embraer E190-E2", "CR9": "Bombardier CRJ900",
+    "AT7": "ATR 72", "DH4": "Dash 8-400",
+}
+
+
+def _flights_out(lg: dict, cabins: list[str]) -> list[dict]:
+    """Each flight of a leg: number, airports, times, aircraft and cabin."""
+    out = []
+    for k, x in enumerate(lg.get("flights") or []):
+        code = x.get("aircraft_code")
+        cab = cabins[k] if k < len(cabins) else None
+        out.append({**x, "aircraft": AIRCRAFT.get(code, code),
+                    "cabin": CABIN_NAMES.get(cab, cab) if cab else None})
+    return out
+
+
 def _row(r: dict, o: Options) -> dict:
     f = r["fare"] or {}
     pax = o.adults + o.children
@@ -404,7 +447,9 @@ def _row(r: dict, o: Options) -> dict:
                          for lay in lg["layovers"]],
             "airline": lg["airline"], "operated_by": lg["operated_by"],
             "equipment": lg["equipment"],
-        } for lg in r["legs"]],
+            "flights": _flights_out(lg, (f.get("_cabins") or [])[i]
+                                    if i < len(f.get("_cabins") or []) else []),
+        } for i, lg in enumerate(r["legs"])],
         "fare_options": [_public_fare(x) for x in r["fares"]],
         "other_departures": r.get("folded", []),
         "key": r["it"].get("key"),

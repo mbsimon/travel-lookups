@@ -344,3 +344,18 @@ def test_an_airport_change_is_caught_with_or_without_fora_labeling_it():
 def test_rows_carry_the_ticketing_deadline():
     row = _build()["shortlist"][0]
     assert row["last_ticket_date"] and all("last_ticket_date" in f for f in row["fare_options"])
+
+
+def test_each_leg_lists_its_flights_with_times_aircraft_and_cabin():
+    """2026-10-07: a client email needed every flight's times and aircraft,
+    and the shortlist only had each leg's first departure and last arrival."""
+    from travel_lookups.fora_rank import AIRCRAFT
+    top = _build()["shortlist"][0]
+    for lg in top["legs"]:
+        fl = lg["flights"]
+        assert fl and fl[0]["from"] == lg["origin"] and fl[-1]["to"] == lg["destination"]
+        assert fl[0]["departs_at"] == lg["departs_at"]
+        for x in fl:
+            assert x["flight"] and x["arrives_at"] and x["minutes"] > 0
+            assert x["aircraft"] == AIRCRAFT.get(x["aircraft_code"], x["aircraft_code"])
+    assert [x["flight"] for lg in top["legs"] for x in lg["flights"]] == top["flights"]
