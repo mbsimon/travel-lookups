@@ -520,6 +520,31 @@ def _cabins_sold(read: list[dict], n_legs: int) -> list[list[str]]:
     return [sorted(s, key=order.index) for s in out]
 
 
+PIN_POOL_AIRLINES_MAX = 8
+
+
+def flight_carriers(flights: list[str]) -> list[str]:
+    """The marketing airlines of these flight numbers ("UA1122" -> "UA")."""
+    return sorted({normalize_flight(f)[:2] for f in flights})
+
+
+def pin_report(itineraries: list[dict], flights: list[str]) -> dict:
+    """What the pool held when pinned flights were not in it together: how
+    many itineraries carry each pinned flight, and which airlines fill it."""
+    def norm(f):
+        try:
+            return normalize_flight(f)
+        except FlightSearchError:
+            return f
+    sets = [{norm(f) for f in flight_numbers(it)} for it in itineraries]
+    airlines = Counter(a for s in sets for a in {f[:2] for f in s})
+    return {
+        "per_flight": {normalize_flight(f): sum(normalize_flight(f) in s for s in sets)
+                       for f in flights},
+        "pool_airlines": dict(airlines.most_common(PIN_POOL_AIRLINES_MAX)),
+    }
+
+
 def build(itineraries: list[dict], o: Options) -> dict:
     """The whole answer for one search. See the module docstring."""
     read = [_read(it, o) for it in itineraries]
@@ -675,9 +700,13 @@ def build(itineraries: list[dict], o: Options) -> dict:
                        + " in this cabin on this date. Drop `nonstop` on that leg or set "
                        "its max_stops to 1.")
     elif o.flights and not routings:
-        out["note"] = (f"None of the {len(itineraries)} fares Fora returned contain all of "
-                       f"{', '.join(o.flights)}. Fora does not sell those flights together "
-                       "as one fare on this date.")
+        out["pin_miss"] = pin_report(itineraries, o.flights)
+        per = ", ".join(f"{f} in {n}" for f, n in out["pin_miss"]["per_flight"].items())
+        out["note"] = (f"None of the {len(itineraries)} itineraries in this Fora response "
+                       f"contain all of {', '.join(o.flights)} ({per}). Fora's response holds "
+                       "a few hundred itineraries and favors cheaper carriers, so this does "
+                       "not prove the flights are unsold together. Search again with "
+                       f"airlines={flight_carriers(o.flights)} to see that airline's own pool.")
     elif o.flights and not ok:
         out["note"] = ("Fora sells those flights together, but not as asked: "
                        + "; ".join(sorted({r['correct'][0][1] for r in routings if r['correct']}))

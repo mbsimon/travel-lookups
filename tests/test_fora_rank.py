@@ -116,9 +116,20 @@ def test_pinned_flights_bypass_comfort_filters_but_not_cabin():
     assert out["shortlist"] and _flights(out["shortlist"][0]) == "DL4664+DL232"
 
 
-def test_flights_not_sold_together_say_so():
+def test_a_pin_miss_says_not_in_this_response_and_counts_the_pool():
     out = _build(flights=["DL2294", "UA966"])
-    assert out["shortlist"] == [] and "does not sell those flights together" in out["note"]
+    assert out["shortlist"] == []
+    assert "not prove" in out["note"] and "does not sell" not in out["note"]
+    assert "airlines=['DL', 'UA']" in out["note"]
+    miss = out["pin_miss"]
+    assert set(miss["per_flight"]) == {"DL2294", "UA966"}
+    assert all(isinstance(n, int) for n in miss["per_flight"].values())
+    assert miss["pool_airlines"] and all(len(a) == 2 for a in miss["pool_airlines"])
+
+
+def test_flight_carriers_are_the_marketing_airlines():
+    from travel_lookups.fora_rank import flight_carriers
+    assert flight_carriers(["UA 1122", "ua187", "SA422"]) == ["SA", "UA"]
 
 
 def test_fare_ladder_shows_the_refundable_step():
